@@ -195,7 +195,7 @@ class IRCBot:
         self.sock: socket.socket | None = None
         self.file = None
         self.seen_sniffed_urls: set[str] = set()
-        self.channel_modes: dict[str, str] = {}
+        self.channel_modes: dict[str, set[str]] = {}
         self.db_initialized = False
         self.cap_negotiation_active = False
         self.sasl_payload_sent = False
@@ -449,6 +449,28 @@ class IRCBot:
         normalized_channel = channel.strip()
         if normalized_channel:
             self.send_raw(f"MODE {normalized_channel}")
+
+    @staticmethod
+    def parse_mode_snapshot(modes: str) -> set[str]:
+        active: set[str] = set()
+        for char in modes:
+            if char in {"+", "-"}:
+                continue
+            active.add(char)
+        return active
+
+    def apply_mode_delta(self, channel: str, mode_changes: str) -> None:
+        active = set(self.channel_modes.get(channel, set()))
+        sign = "+"
+        for char in mode_changes:
+            if char in {"+", "-"}:
+                sign = char
+                continue
+            if sign == "+":
+                active.add(char)
+            else:
+                active.discard(char)
+        self.channel_modes[channel] = active
 
     def remember_channel(self, channel: str) -> None:
         normalized_channel = channel.strip()
@@ -791,13 +813,13 @@ class IRCBot:
             if command == "324" and len(params) >= 3:
                 channel = params[1]
                 modes = params[2]
-                self.channel_modes[channel] = modes
+                self.channel_modes[channel] = self.parse_mode_snapshot(modes)
                 continue
 
             if command == "MODE" and len(params) >= 2:
                 channel = params[0]
                 modes = params[1]
-                self.channel_modes[channel] = modes
+                self.apply_mode_delta(channel, modes)
                 continue
 
             if command == "PRIVMSG" and len(params) >= 2:
@@ -1063,9 +1085,8 @@ class IRCBot:
         if not reply_target.startswith("#"):
             return False
 
-        modes = self.channel_modes.get(reply_target, "")
-        normalized_modes = modes.lower()
-        return "c" not in normalized_modes
+        modes = self.channel_modes.get(reply_target, set())
+        return "c" not in modes
 
     def format_weather_with_control_codes(
         self,
