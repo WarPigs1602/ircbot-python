@@ -158,3 +158,6 @@ See `config.example.json` for all available options, including:
 - SASL (`sasl_enabled`, `sasl_username`, `sasl_password`, `sasl_authzid`)
 - Nick protection (`nick_protection_enabled`, `nick_protection_nick`, `nick_reclaim_interval_seconds`)
 - NickServ identify command template (`nickserv_identify_command`)
+
+## License
+This project is licensed under the MIT License. See `LICENSE` for details.
