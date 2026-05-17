@@ -1830,9 +1830,10 @@ class IRCBot:
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS bot_channels (
+                        network VARCHAR(255) NOT NULL,
                         channel VARCHAR(128) NOT NULL,
                         joined_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (channel)
+                        PRIMARY KEY (network, channel)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """
                 )
@@ -1849,7 +1850,7 @@ class IRCBot:
 
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT channel FROM bot_channels ORDER BY channel ASC")
+                cur.execute("SELECT channel FROM bot_channels WHERE network = %s ORDER BY channel ASC", (self.config.server,))
                 rows = cur.fetchall() or []
             return [str(row.get("channel", "")).strip() for row in rows if str(row.get("channel", "")).strip()]
         except Exception:
@@ -1865,8 +1866,8 @@ class IRCBot:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT IGNORE INTO bot_channels (channel, joined_at) VALUES (%s, %s)",
-                    (channel, self.current_time_string()),
+                    "INSERT IGNORE INTO bot_channels (network, channel, joined_at) VALUES (%s, %s, %s)",
+                    (self.config.server, channel, self.current_time_string()),
                 )
         except Exception:
             pass
@@ -1880,7 +1881,7 @@ class IRCBot:
 
         try:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM bot_channels WHERE channel = %s", (channel,))
+                cur.execute("DELETE FROM bot_channels WHERE network = %s AND channel = %s", (self.config.server, channel))
         except Exception:
             pass
         finally:
