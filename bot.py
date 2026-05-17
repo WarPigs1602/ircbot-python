@@ -140,7 +140,7 @@ class BotConfig:
     nickserv_identify_command: str = "PRIVMSG NickServ :IDENTIFY {password}"
     oidentd_conf: str = ""
     network_key: str = ""
-    reconnect_delay_seconds: int = 10
+    reconnect_delay_seconds: int = 30
 
     @staticmethod
     def _from_raw(raw: dict[str, object]) -> "BotConfig":
@@ -196,7 +196,7 @@ class BotConfig:
             nickserv_identify_command=str(raw.get("nickserv_identify_command", "PRIVMSG NickServ :IDENTIFY {password}")),
             oidentd_conf=str(raw.get("oidentd_conf", "")).strip(),
             network_key=network_key,
-            reconnect_delay_seconds=max(1, int(raw.get("reconnect_delay_seconds", 10))),
+            reconnect_delay_seconds=max(1, int(raw.get("reconnect_delay_seconds", 30))),
         )
 
     @staticmethod
@@ -252,7 +252,10 @@ class IRCBot:
         self._flood_timestamps: deque[float] = deque()
         self._last_chat_send_at: float = 0.0
         self.pending_lag_checks: dict[str, tuple[int, str]] = {}
+        self.initial_nick = self.config.nick
+        self.current_nick = self.config.nick
         self.preferred_nick = self.config.nick_protection_nick or self.config.nick
+        self.fallback_nick = (f"{self.initial_nick}_" if self.initial_nick else "_")[:15]
         self.last_nick_reclaim_attempt_at: float = 0.0
         self.nickserv_identify_sent = False
         self.startup_actions_completed = False
@@ -410,7 +413,7 @@ class IRCBot:
         if self.config.password:
             self.send_raw(f"PASS {self.config.password}")
 
-        self.send_raw(f"NICK {self.config.nick}")
+        self.send_raw(f"NICK {self.current_nick}")
         self.send_raw(f"USER {self.config.username} 0 * :{self.config.realname}")
         self.last_nick_reclaim_attempt_at = 0.0
         self.nickserv_identify_sent = False
@@ -558,7 +561,7 @@ class IRCBot:
             if not command:
                 continue
 
-            resolved = command.replace("{nick}", self.config.nick)
+            resolved = command.replace("{nick}", self.current_nick)
             self.send_raw(resolved)
 
     def should_use_nickserv_identify(self) -> bool:
@@ -570,7 +573,7 @@ class IRCBot:
 
         command = self.config.nickserv_identify_command.format(
             password=self.config.nickserv_password,
-            nick=self.config.nick,
+            nick=self.current_nick,
             preferred_nick=self.preferred_nick,
         ).strip()
         if not command:
@@ -593,7 +596,7 @@ class IRCBot:
         if not self.config.nick_protection_enabled:
             return
 
-        if self.config.nick.lower() == self.preferred_nick.lower():
+        if self.current_nick.lower() == self.preferred_nick.lower():
             return
 
         now = time.monotonic()
@@ -812,8 +815,8 @@ class IRCBot:
             if command == "NICK" and len(params) >= 1:
                 changed_nick = prefix.split("!", 1)[0] if prefix else ""
                 new_nick = params[0].lstrip(":")
-                if changed_nick.lower() == self.config.nick.lower() and new_nick:
-                    self.config.nick = new_nick
+                if changed_nick.lower() == self.current_nick.lower() and new_nick:
+                    self.current_nick = new_nick
                     if new_nick.lower() == self.preferred_nick.lower():
                         self.last_nick_reclaim_attempt_at = 0.0
                 continue
@@ -821,7 +824,7 @@ class IRCBot:
             if command == "JOIN" and len(params) >= 1:
                 joined_channel = params[0].lstrip(":")
                 joined_nick = prefix.split("!", 1)[0] if prefix else ""
-                if joined_nick.lower() == self.config.nick.lower() and joined_channel:
+                if joined_nick.lower() == self.current_nick.lower() and joined_channel:
                     self.remember_channel(joined_channel)
                     self.request_channel_modes(joined_channel)
                 continue
@@ -829,23 +832,25 @@ class IRCBot:
             if command == "PART" and len(params) >= 1:
                 parted_channel = params[0].lstrip(":")
                 parted_nick = prefix.split("!", 1)[0] if prefix else ""
-                if parted_nick.lower() == self.config.nick.lower() and parted_channel:
+                if parted_nick.lower() == self.current_nick.lower() and parted_channel:
                     self.forget_channel(parted_channel)
                 continue
 
             if command == "KICK" and len(params) >= 2:
                 kicked_channel = params[0].lstrip(":")
                 kicked_nick = params[1]
-                if kicked_nick.lower() == self.config.nick.lower() and kicked_channel:
+                if kicked_nick.lower() == self.current_nick.lower() and kicked_channel:
                     self.forget_channel(kicked_channel)
                 continue
 
             if command == "433":
-                old_nick = self.config.nick
-                next_nick = f"{self.config.nick}_"
-                self.config.nick = next_nick[:15]
-                print(self.tr("nick_taken", old_nick=old_nick, new_nick=self.config.nick))
-                self.send_raw(f"NICK {self.config.nick}")
+                old_nick = self.current_nick
+                if self.current_nick.lower() != self.fallback_nick.lower():
+                    self.current_nick = self.fallback_nick
+                    print(self.tr("nick_taken", old_nick=old_nick, new_nick=self.current_nick))
+                    self.send_raw(f"NICK {self.current_nick}")
+                else:
+                    print(self.tr("nick_taken", old_nick=old_nick, new_nick=self.current_nick))
                 continue
 
             if command in {"403", "405", "471", "473", "474", "475", "476", "477", "489"} and len(params) >= 2:
@@ -860,14 +865,14 @@ class IRCBot:
                 invited_channel = params[1]
                 inviter_nick = prefix.split("!", 1)[0] if prefix else ""
 
-                if invited_nick.lower() == self.config.nick.lower():
+                if invited_nick.lower() == self.current_nick.lower():
                     self.remember_channel(invited_channel)
                     self.send_raw(f"JOIN {invited_channel}")
                     self.request_channel_modes(invited_channel)
                     if inviter_nick:
                         self.send_action(
                             invited_channel,
-                            f"slaps {inviter_nick} around a bit with a large {self.config.nick}",
+                            f"slaps {inviter_nick} around a bit with a large {self.current_nick}",
                         )
                 continue
 
@@ -893,7 +898,7 @@ class IRCBot:
         self.sniff_urls_in_message(message, target, source_nick)
 
         if re.search(r"\bunreal\b", message, re.IGNORECASE):
-            action_target = source_nick if target.lower() == self.config.nick.lower() else target
+            action_target = source_nick if target.lower() == self.current_nick.lower() else target
             self.send_action(action_target, "rocketjumps!")
 
         prefix = self.config.command_prefix
@@ -909,7 +914,7 @@ class IRCBot:
         arg = parts[1] if len(parts) > 1 else ""
         command = self.resolve_command(command) or command
 
-        reply_target = source_nick if target.lower() == self.config.nick.lower() else target
+        reply_target = source_nick if target.lower() == self.current_nick.lower() else target
 
         if command == "help":
             self.send_notice(source_nick, self.build_help_text(prefix))
@@ -944,7 +949,7 @@ class IRCBot:
 
             self.send_action(
                 reply_target,
-                f"slaps {target_nick} around a bit with a large {self.config.nick}",
+                f"slaps {target_nick} around a bit with a large {self.current_nick}",
             )
             return
 
@@ -1403,7 +1408,7 @@ class IRCBot:
         if points == 31337:
             return self.tr(
                 "dart_destroy",
-                bot=self.config.nick,
+                bot=self.current_nick,
                 target=target_nick,
                 points=self.format_points(points),
                 hit=hit_text,
@@ -1412,7 +1417,7 @@ class IRCBot:
 
         return self.tr(
             "dart_hit",
-            bot=self.config.nick,
+            bot=self.current_nick,
             target=target_nick,
             hit=hit_text,
             points=self.format_points(points),
@@ -2176,10 +2181,13 @@ def start_background_process(pid_file: Path) -> bool:
 
 
 def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None) -> None:
-    retry_wait = config.reconnect_delay_seconds
+    base_retry_wait = max(30, config.reconnect_delay_seconds)
+    retry_wait = base_retry_wait
+    max_retry_wait = 300
     while not (stop_event and stop_event.is_set()):
         bot = IRCBot(config)
         bot.setup_oidentd_conf()
+        connected_at = time.monotonic()
         try:
             print(f"[{config.display_name()}] " + bot.tr("connecting", server=config.server, port=config.port, tls=config.use_tls))
             bot.connect()
@@ -2204,6 +2212,12 @@ def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None
                 break
         else:
             time.sleep(retry_wait)
+
+        uptime = time.monotonic() - connected_at
+        if uptime >= 300:
+            retry_wait = base_retry_wait
+        else:
+            retry_wait = min(max_retry_wait, max(base_retry_wait, retry_wait * 2))
 
 
 def run_multiple_bots_forever(configs: list[BotConfig]) -> None:
