@@ -137,6 +137,7 @@ class BotConfig:
     nick_reclaim_interval_seconds: int = 60
     nickserv_password: str = ""
     nickserv_identify_command: str = "PRIVMSG NickServ :IDENTIFY {password}"
+    oidentd_conf: str = ""
 
     @staticmethod
     def from_file(path: Path) -> "BotConfig":
@@ -184,6 +185,7 @@ class BotConfig:
             nick_reclaim_interval_seconds=max(5, int(raw.get("nick_reclaim_interval_seconds", 60))),
             nickserv_password=raw.get("nickserv_password", ""),
             nickserv_identify_command=str(raw.get("nickserv_identify_command", "PRIVMSG NickServ :IDENTIFY {password}")),
+            oidentd_conf=str(raw.get("oidentd_conf", "")).strip(),
         )
 
 
@@ -374,6 +376,23 @@ class IRCBot:
                 self.sock.close()
         finally:
             self.sock = None
+
+    def setup_oidentd_conf(self) -> None:
+        if not self.config.oidentd_conf:
+            return
+
+        try:
+            oidentd_path = Path(self.config.oidentd_conf).expanduser().resolve()
+            oidentd_path.parent.mkdir(parents=True, exist_ok=True)
+
+            content = f"""global {{
+    reply "{self.config.username}"
+}}
+"""
+            oidentd_path.write_text(content, encoding="utf-8")
+            print(f"oidentd.conf created: {oidentd_path}")
+        except Exception as exc:
+            print(f"Failed to create oidentd.conf: {exc}")
 
     def send_raw(self, line: str) -> None:
         if not self.sock:
@@ -2078,6 +2097,7 @@ def run_bot_forever(config: BotConfig) -> None:
     retry_wait = 10
     while True:
         bot = IRCBot(config)
+        bot.setup_oidentd_conf()
         try:
             print(bot.tr("connecting", server=config.server, port=config.port, tls=config.use_tls))
             bot.connect()

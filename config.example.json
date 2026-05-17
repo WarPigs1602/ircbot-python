@@ -8,6 +8,7 @@
   "realname": "Python IRC Bot",
   "channels": ["#dein-kanal"],
   "password": "",
+  "oidentd_conf": "",
   "command_prefix": "!",
   "mysql_host": "127.0.0.1",
   "mysql_port": 3306,

@@ -7,6 +7,7 @@ A Python IRC bot with reconnect logic, command handling, URL sniffing, weather l
 - Automatic reconnect loop on network errors
 - Responds to server `PING` with `PONG`
 - Joins and tracks multiple channels
+- Optional oidentd.conf generation for ident spoofing (`oidentd_conf` path)
 - Saves joined channels in MySQL and restores them on restart
 - Optional flood protection for outgoing chat messages
 - Optional SASL PLAIN authentication (`CAP` negotiation)
@@ -37,7 +38,7 @@ A Python IRC bot with reconnect logic, command handling, URL sniffing, weather l
 4. Edit `config.json`:
   - IRC settings: `server`, `port`, `use_tls`, `nick`, `username`, `channels`
   - Database settings: `mysql_host`, `mysql_port`, `mysql_user`, `mysql_password`, `mysql_database`
-  - Optional: `weather_default_location`, `youtube_api_key`, `language`, SASL/NickServ options
+  - Optional: `weather_default_location`, `youtube_api_key`, `language`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
 5. Install dependencies:
   - `python -m pip install -r requirements.txt`
 
