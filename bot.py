@@ -10,6 +10,7 @@ import ssl
 import subprocess
 import sys
 import signal
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -138,10 +139,15 @@ class BotConfig:
     nickserv_password: str = ""
     nickserv_identify_command: str = "PRIVMSG NickServ :IDENTIFY {password}"
     oidentd_conf: str = ""
+    network_key: str = ""
+    reconnect_delay_seconds: int = 10
 
     @staticmethod
-    def from_file(path: Path) -> "BotConfig":
-        raw = json.loads(path.read_text(encoding="utf-8"))
+    def _from_raw(raw: dict[str, object]) -> "BotConfig":
+        server = str(raw["server"])
+        port = int(raw.get("port", 6697))
+        nick = str(raw["nick"])
+
         perform_raw = raw.get("perform", [])
         if isinstance(perform_raw, str):
             perform_list = [perform_raw]
@@ -153,41 +159,85 @@ class BotConfig:
         language_raw = str(raw.get("language", "de")).strip().lower()
         language = language_raw if language_raw in {"de", "en"} else "de"
 
+        configured_network_key = str(raw.get("network_key", "")).strip()
+        network_key = configured_network_key or f"{server}:{port}:{nick}".lower()
+
         return BotConfig(
-            server=raw["server"],
-            port=int(raw.get("port", 6697)),
+            server=server,
+            port=port,
             use_tls=bool(raw.get("use_tls", True)),
-            nick=raw["nick"],
+            nick=nick,
             bind_ip=str(raw.get("bind_ip", "")).strip(),
-            username=raw.get("username", raw["nick"]),
-            realname=raw.get("realname", "Python IRC Bot"),
+            username=str(raw.get("username", nick)),
+            realname=str(raw.get("realname", "Python IRC Bot")),
             channels=list(raw.get("channels", [])),
-            password=raw.get("password", ""),
-            command_prefix=raw.get("command_prefix", "!"),
-            mysql_host=raw.get("mysql_host", "127.0.0.1"),
+            password=str(raw.get("password", "")),
+            command_prefix=str(raw.get("command_prefix", "!")),
+            mysql_host=str(raw.get("mysql_host", "127.0.0.1")),
             mysql_port=int(raw.get("mysql_port", 3306)),
-            mysql_user=raw.get("mysql_user", "root"),
-            mysql_password=raw.get("mysql_password", ""),
-            mysql_database=raw.get("mysql_database", "nullbot"),
-            weather_default_location=raw.get("weather_default_location", ""),
-            youtube_api_key=raw.get("youtube_api_key", ""),
+            mysql_user=str(raw.get("mysql_user", "root")),
+            mysql_password=str(raw.get("mysql_password", "")),
+            mysql_database=str(raw.get("mysql_database", "nullbot")),
+            weather_default_location=str(raw.get("weather_default_location", "")),
+            youtube_api_key=str(raw.get("youtube_api_key", "")),
             perform=perform_list,
             sasl_enabled=bool(raw.get("sasl_enabled", False)),
-            sasl_username=raw.get("sasl_username", ""),
-            sasl_password=raw.get("sasl_password", ""),
-            sasl_authzid=raw.get("sasl_authzid", ""),
+            sasl_username=str(raw.get("sasl_username", "")),
+            sasl_password=str(raw.get("sasl_password", "")),
+            sasl_authzid=str(raw.get("sasl_authzid", "")),
             language=language,
             flood_burst=max(1, int(raw.get("flood_burst", 4))),
             flood_window_seconds=max(0.1, float(raw.get("flood_window_seconds", 2.0))),
             flood_min_interval_ms=max(0, int(raw.get("flood_min_interval_ms", 700))),
             nick_protection_enabled=bool(raw.get("nick_protection_enabled", False)),
-            nick_protection_nick=str(raw.get("nick_protection_nick", raw.get("nick", ""))).strip(),
+            nick_protection_nick=str(raw.get("nick_protection_nick", nick)).strip(),
             nick_reclaim_interval_seconds=max(5, int(raw.get("nick_reclaim_interval_seconds", 60))),
-            nickserv_password=raw.get("nickserv_password", ""),
+            nickserv_password=str(raw.get("nickserv_password", "")),
             nickserv_identify_command=str(raw.get("nickserv_identify_command", "PRIVMSG NickServ :IDENTIFY {password}")),
             oidentd_conf=str(raw.get("oidentd_conf", "")).strip(),
+            network_key=network_key,
+            reconnect_delay_seconds=max(1, int(raw.get("reconnect_delay_seconds", 10))),
         )
 
+    @staticmethod
+    def load_from_file(path: Path) -> list["BotConfig"]:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        networks_raw = raw.get("networks")
+
+        if not isinstance(networks_raw, list) or not networks_raw:
+            raise ValueError("config.json muss ein nicht-leeres 'networks' Array enthalten.")
+
+        base = {k: v for k, v in raw.items() if k != "networks"}
+        configs: list[BotConfig] = []
+
+        for index, network_raw in enumerate(networks_raw, start=1):
+            if not isinstance(network_raw, dict):
+                raise ValueError(f"networks[{index - 1}] muss ein Objekt sein.")
+
+            if not bool(network_raw.get("enabled", True)):
+                continue
+
+            merged = dict(base)
+            merged.update(network_raw)
+            try:
+                configs.append(BotConfig._from_raw(merged))
+            except KeyError as exc:
+                missing_key = exc.args[0]
+                raise ValueError(f"networks[{index - 1}] fehlt Pflichtfeld: {missing_key}") from exc
+
+        if not configs:
+            raise ValueError("Kein aktives Netzwerk in 'networks' gefunden (enabled=true).")
+
+        seen_keys: set[str] = set()
+        for config in configs:
+            if config.network_key in seen_keys:
+                raise ValueError(f"Doppelter network_key gefunden: {config.network_key}")
+            seen_keys.add(config.network_key)
+
+        return configs
+
+    def display_name(self) -> str:
+        return f"{self.server}:{self.port}"
 
 class IRCBot:
     def __init__(self, config: BotConfig) -> None:
@@ -205,6 +255,7 @@ class IRCBot:
         self.preferred_nick = self.config.nick_protection_nick or self.config.nick
         self.last_nick_reclaim_attempt_at: float = 0.0
         self.nickserv_identify_sent = False
+        self.startup_actions_completed = False
 
     def tr(self, key: str, **kwargs) -> str:
         language = self.config.language if self.config.language in {"de", "en"} else "de"
@@ -528,6 +579,16 @@ class IRCBot:
         self.send_raw(command)
         self.nickserv_identify_sent = True
 
+    def complete_startup_actions(self) -> None:
+        if self.startup_actions_completed:
+            return
+
+        self.run_perform_commands()
+        self.join_channels(self.config.channels)
+        for channel in self.config.channels:
+            self.request_channel_modes(channel)
+        self.startup_actions_completed = True
+
     def try_reclaim_preferred_nick(self, force: bool = False) -> None:
         if not self.config.nick_protection_enabled:
             return
@@ -742,10 +803,10 @@ class IRCBot:
             if command == "001":
                 self.send_nickserv_identify()
                 self.try_reclaim_preferred_nick(force=True)
-                self.run_perform_commands()
-                self.join_channels(self.config.channels)
-                for channel in self.config.channels:
-                    self.request_channel_modes(channel)
+                continue
+
+            if command in {"376", "422"}:
+                self.complete_startup_actions()
                 continue
 
             if command == "NICK" and len(params) >= 1:
@@ -1890,7 +1951,7 @@ class IRCBot:
 
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT channel FROM bot_channels WHERE network = %s ORDER BY channel ASC", (self.config.server,))
+                cur.execute("SELECT channel FROM bot_channels WHERE network = %s ORDER BY channel ASC", (self.config.network_key,))
                 rows = cur.fetchall() or []
             return [str(row.get("channel", "")).strip() for row in rows if str(row.get("channel", "")).strip()]
         except Exception:
@@ -1907,7 +1968,7 @@ class IRCBot:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT IGNORE INTO bot_channels (network, channel, joined_at) VALUES (%s, %s, %s)",
-                    (self.config.server, channel, self.current_time_string()),
+                    (self.config.network_key, channel, self.current_time_string()),
                 )
         except Exception:
             pass
@@ -1921,7 +1982,7 @@ class IRCBot:
 
         try:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM bot_channels WHERE network = %s AND channel = %s", (self.config.server, channel))
+                cur.execute("DELETE FROM bot_channels WHERE network = %s AND channel = %s", (self.config.network_key, channel))
         except Exception:
             pass
         finally:
@@ -2114,26 +2175,62 @@ def start_background_process(pid_file: Path) -> bool:
     return True
 
 
-def run_bot_forever(config: BotConfig) -> None:
-    retry_wait = 10
-    while True:
+def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None) -> None:
+    retry_wait = config.reconnect_delay_seconds
+    while not (stop_event and stop_event.is_set()):
         bot = IRCBot(config)
         bot.setup_oidentd_conf()
         try:
-            print(bot.tr("connecting", server=config.server, port=config.port, tls=config.use_tls))
+            print(f"[{config.display_name()}] " + bot.tr("connecting", server=config.server, port=config.port, tls=config.use_tls))
             bot.connect()
             bot.run()
-            print(bot.tr("connection_closed"))
+            print(f"[{config.display_name()}] " + bot.tr("connection_closed"))
         except (OSError, ssl.SSLError) as exc:
-            print(bot.tr("network_error", error=exc))
+            print(f"[{config.display_name()}] " + bot.tr("network_error", error=exc))
         except KeyboardInterrupt:
-            print(bot.tr("shutting_down"))
+            print(f"[{config.display_name()}] " + bot.tr("shutting_down"))
+            if stop_event:
+                stop_event.set()
             break
         finally:
             bot.close()
 
-        print(bot.tr("reconnect_in", seconds=retry_wait))
-        time.sleep(retry_wait)
+        if stop_event and stop_event.is_set():
+            break
+
+        print(f"[{config.display_name()}] " + bot.tr("reconnect_in", seconds=retry_wait))
+        if stop_event:
+            if stop_event.wait(retry_wait):
+                break
+        else:
+            time.sleep(retry_wait)
+
+
+def run_multiple_bots_forever(configs: list[BotConfig]) -> None:
+    stop_event = threading.Event()
+    threads: list[threading.Thread] = []
+
+    for config in configs:
+        thread = threading.Thread(
+            target=run_bot_forever,
+            args=(config, stop_event),
+            name=f"bot-{config.display_name()}",
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+
+    try:
+        while any(thread.is_alive() for thread in threads):
+            for thread in threads:
+                thread.join(timeout=0.5)
+    except KeyboardInterrupt:
+        print("Beende Bots.")
+    finally:
+        stop_event.set()
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=2)
 
 
 def main() -> None:
@@ -2170,7 +2267,10 @@ def main() -> None:
             "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
         )
 
-    config = BotConfig.from_file(config_path)
+    try:
+        configs = BotConfig.load_from_file(config_path)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     if args.run_foreground:
         if pid_file.exists():
@@ -2185,7 +2285,12 @@ def main() -> None:
         signal.signal(signal.SIGTERM, _shutdown_handler)
         signal.signal(signal.SIGINT, _shutdown_handler)
 
-    run_bot_forever(config)
+    if len(configs) == 1:
+        run_bot_forever(configs[0])
+        return
+
+    print(f"Starte {len(configs)} Netzwerke parallel.")
+    run_multiple_bots_forever(configs)
 
 
 if __name__ == "__main__":

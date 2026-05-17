@@ -4,6 +4,8 @@ A Python IRC bot with reconnect logic, command handling, URL sniffing, weather l
 
 ## Features
 - TLS connection support (`use_tls`, enabled by default)
+- Multi-network support via required `networks` array (one bot connection per entry)
+- Per-network `enabled` flag and reconnect delay (`reconnect_delay_seconds`)
 - Automatic reconnect loop on network errors
 - Responds to server `PING` with `PONG`
 - Joins and tracks multiple channels
@@ -36,7 +38,8 @@ A Python IRC bot with reconnect logic, command handling, URL sniffing, weather l
   - `python3 -m venv .venv`
   - `source .venv/bin/activate`
 4. Edit `config.json`:
-  - IRC settings: `server`, `port`, `use_tls`, `nick`, `username`, `channels`
+  - Define `networks` (required) and set per-network values (`server`, `port`, `use_tls`, `nick`, `channels`, ...)
+  - Top-level values act as defaults for all entries in `networks`
   - Database settings: `mysql_host`, `mysql_port`, `mysql_user`, `mysql_password`, `mysql_database`
   - Optional: `weather_default_location`, `youtube_api_key`, `language`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
 5. Install dependencies:
@@ -157,10 +160,13 @@ If MySQL is unavailable, startup continues, but DB-backed features may not work.
 
 ## Configuration Example
 See `config.example.json` for all available options, including:
-- flood limits (`flood_burst`, `flood_window_seconds`, `flood_min_interval_ms`)
-- SASL (`sasl_enabled`, `sasl_username`, `sasl_password`, `sasl_authzid`)
-- Nick protection (`nick_protection_enabled`, `nick_protection_nick`, `nick_reclaim_interval_seconds`)
-- NickServ identify command template (`nickserv_identify_command`)
+- Multi-network mode (`networks`):
+  - required (legacy single-network root fields are no longer supported)
+  - top-level values are defaults for every network entry
+  - each network object can override any setting
+  - `enabled` can disable a network without deleting its config (recommended instead of commenting, since JSON has no comments)
+  - `reconnect_delay_seconds` controls reconnect interval per network
+  - `network_key` can be used to control channel persistence key in `bot_channels.network` (must be unique)
 
 ## License
 This project is licensed under the MIT License. See `LICENSE` for details.
