@@ -104,6 +104,7 @@ Default prefix: `!`
 - `!help` / `!hilfe`
 - `!ping [nick]`
 - `!pong [nick]`
+- `!lag`
 - `!echo <text>`
 - `!slap <nick>`
 - `!dart [nick]`
@@ -117,6 +118,7 @@ Default prefix: `!`
 Notes:
 - `!help`, `!echo`, and `!mydartstats` are sent as NOTICE to the requesting user.
 - If `!dart` has no argument, the caller nickname is used.
+- `!lag` measures latency in nanoseconds and displays a readable millisecond value (for sub-millisecond latency as decimal, e.g. `0.123 ms`) plus raw `ns` in parentheses.
 - If `weather_default_location` is set, weather can be requested without arguments.
 
 ## URL and YouTube Behavior

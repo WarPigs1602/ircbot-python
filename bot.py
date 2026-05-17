@@ -199,6 +199,7 @@ class IRCBot:
         self.sasl_payload_sent = False
         self._flood_timestamps: deque[float] = deque()
         self._last_chat_send_at: float = 0.0
+        self.pending_lag_checks: dict[str, tuple[int, str]] = {}
         self.preferred_nick = self.config.nick_protection_nick or self.config.nick
         self.last_nick_reclaim_attempt_at: float = 0.0
         self.nickserv_identify_sent = False
@@ -212,6 +213,7 @@ class IRCBot:
                 "nick_taken": "Nickname {old_nick} ist belegt, verwende {new_nick}",
                 "channel_not_joinable": "Channel nicht joinbar, entferne aus Liste: {channel}",
                 "help": "Befehle: {prefix}help, {prefix}ping, {prefix}echo <text>, {prefix}slap <nick>, {prefix}dart <nick>, {prefix}darttop10, {prefix}wetter <ort>, {prefix}url <id>, {prefix}randomurl",
+                "lag_now": "Aktueller Lag: {ms} ms ({ns} ns)",
                 "usage_echo": "Nutzung: {prefix}{command} <text>",
                 "usage_slap": "Nutzung: {prefix}{command} <nick>",
                 "usage_dart": "Nutzung: {prefix}{command} <nick>",
@@ -274,6 +276,7 @@ class IRCBot:
                 "nick_taken": "Nickname {old_nick} is taken, using {new_nick}",
                 "channel_not_joinable": "Channel not joinable, removing from list: {channel}",
                 "help": "Commands: {prefix}help, {prefix}ping, {prefix}echo <text>, {prefix}slap <nick>, {prefix}dart <nick>, {prefix}darttop10, {prefix}wetter <location>, {prefix}url <id>, {prefix}randomurl",
+                "lag_now": "Current lag: {ms} ms ({ns} ns)",
                 "usage_echo": "Usage: {prefix}{command} <text>",
                 "usage_slap": "Usage: {prefix}{command} <nick>",
                 "usage_dart": "Usage: {prefix}{command} <nick>",
@@ -505,6 +508,7 @@ class IRCBot:
             "help": ["help", "hilfe"],
             "ping": ["ping"],
             "pong": ["pong"],
+            "lag": ["lag"],
             "echo": ["echo"],
             "slap": ["slap"],
             "dart": ["dart"],
@@ -536,7 +540,7 @@ class IRCBot:
         return None
 
     def build_help_text(self, prefix: str) -> str:
-        ordered = ["help", "ping", "pong", "echo", "slap", "dart", "darttop10", "mydartstats", "weather", "url", "randomurl"]
+        ordered = ["help", "ping", "pong", "lag", "echo", "slap", "dart", "darttop10", "mydartstats", "weather", "url", "randomurl"]
         rendered = []
         for name in ordered:
             cmd = self.primary_command_name(name)
@@ -553,6 +557,29 @@ class IRCBot:
         label = "Befehle" if self.config.language == "de" else "Commands"
         return f"{label}: " + ", ".join(rendered)
 
+    def send_lag_probe(self, reply_target: str) -> None:
+        token = f"lag-{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+        self.pending_lag_checks[token] = (time.monotonic_ns(), reply_target)
+        self.send_raw(f"PING :{token}")
+
+    def handle_pong_message(self, params: list[str]) -> None:
+        if not params or not self.pending_lag_checks:
+            return
+
+        candidates = [part.lstrip(":") for part in params if part]
+        for token in candidates:
+            lag_entry = self.pending_lag_checks.pop(token, None)
+            if lag_entry is None:
+                continue
+
+            started_at_ns, reply_target = lag_entry
+            lag_ns = max(0, time.monotonic_ns() - started_at_ns)
+            self.send_privmsg(
+                reply_target,
+                self.tr("lag_now", ms=self.format_lag_ms(lag_ns), ns=self.format_lag_ns(lag_ns)),
+            )
+            return
+
     def format_points(self, value: int) -> str:
         formatted = f"{value:,}"
         return formatted.replace(",", ".") if self.config.language == "de" else formatted
@@ -560,6 +587,16 @@ class IRCBot:
     def format_average(self, value: float) -> str:
         text = f"{value:.2f}"
         return text.replace(".", ",") if self.config.language == "de" else text
+
+    def format_lag_ms(self, lag_ns: int) -> str:
+        lag_ms = lag_ns / 1_000_000.0
+        # If latency is below 1 ms, show 3 decimals (e.g. 0.123 ms).
+        text = f"{lag_ms:.3f}" if lag_ns < 1_000_000 else f"{lag_ms:.2f}"
+        return text.replace(".", ",") if self.config.language == "de" else text
+
+    def format_lag_ns(self, lag_ns: int) -> str:
+        text = f"{lag_ns:,}"
+        return text.replace(",", ".") if self.config.language == "de" else text
 
     def end_cap_negotiation(self) -> None:
         if self.cap_negotiation_active:
@@ -647,6 +684,10 @@ class IRCBot:
 
             if command == "CAP":
                 self.handle_cap_message(params)
+                continue
+
+            if command == "PONG":
+                self.handle_pong_message(params)
                 continue
 
             if command == "AUTHENTICATE":
@@ -780,6 +821,10 @@ class IRCBot:
         if command == "pong":
             target_nick = arg.strip() if arg.strip() else source_nick
             self.send_action(reply_target, f"slaps {target_nick} around a bit with a large !ping")
+            return
+
+        if command == "lag":
+            self.send_lag_probe(reply_target)
             return
 
         if command == "echo":
