@@ -12,6 +12,7 @@ import sys
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from dataclasses import dataclass
 from html import unescape
@@ -141,6 +142,7 @@ class BotConfig:
     oidentd_conf: str = ""
     network_key: str = ""
     reconnect_delay_seconds: int = 30
+    url_timeout_seconds: float = 3.0
 
     @staticmethod
     def _from_raw(raw: dict[str, object]) -> "BotConfig":
@@ -197,6 +199,7 @@ class BotConfig:
             oidentd_conf=str(raw.get("oidentd_conf", "")).strip(),
             network_key=network_key,
             reconnect_delay_seconds=max(1, int(raw.get("reconnect_delay_seconds", 30))),
+            url_timeout_seconds=max(0.5, float(raw.get("url_timeout_seconds", 3.0))),
         )
 
     @staticmethod
@@ -259,6 +262,8 @@ class IRCBot:
         self.last_nick_reclaim_attempt_at: float = 0.0
         self.nickserv_identify_sent = False
         self.startup_actions_completed = False
+        self._send_lock = threading.RLock()
+        self._url_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="urlsniff")
 
     def tr(self, key: str, **kwargs) -> str:
         language = self.config.language if self.config.language in {"de", "en"} else "de"
@@ -419,6 +424,10 @@ class IRCBot:
         self.nickserv_identify_sent = False
 
     def close(self) -> None:
+        if self._url_executor is not None:
+            self._url_executor.shutdown(wait=False, cancel_futures=True)
+            self._url_executor = None
+
         try:
             if self.file:
                 self.file.close()
@@ -449,23 +458,40 @@ class IRCBot:
             print(f"Failed to create oidentd.conf: {exc}")
 
     def send_raw(self, line: str) -> None:
-        if not self.sock:
-            raise RuntimeError(self.tr("not_connected"))
-        payload = (line + "\r\n").encode("utf-8")
-        self.sock.sendall(payload)
-        print(f">>> {line}")
+        with self._send_lock:
+            if not self.sock:
+                raise RuntimeError(self.tr("not_connected"))
+            payload = (line + "\r\n").encode("utf-8")
+            self.sock.sendall(payload)
+            print(f">>> {line}")
 
     def send_privmsg(self, target: str, message: str) -> None:
-        self.apply_flood_protection()
-        self.send_raw(f"PRIVMSG {target} :{message}")
+        with self._send_lock:
+            self.apply_flood_protection()
+            self.send_raw(f"PRIVMSG {target} :{message}")
 
     def send_notice(self, target: str, message: str) -> None:
-        self.apply_flood_protection()
-        self.send_raw(f"NOTICE {target} :{message}")
+        with self._send_lock:
+            self.apply_flood_protection()
+            self.send_raw(f"NOTICE {target} :{message}")
 
     def send_action(self, target: str, message: str) -> None:
-        self.apply_flood_protection()
-        self.send_raw(f"PRIVMSG {target} :\x01ACTION {message}\x01")
+        with self._send_lock:
+            self.apply_flood_protection()
+            self.send_raw(f"PRIVMSG {target} :\x01ACTION {message}\x01")
+
+    def schedule_url_sniff(self, message: str, channel: str, source_nick: str) -> None:
+        if not URL_PATTERN.search(message):
+            return
+        if self._url_executor is None:
+            return
+        self._url_executor.submit(self._safe_sniff_urls_in_message, message, channel, source_nick)
+
+    def _safe_sniff_urls_in_message(self, message: str, channel: str, source_nick: str) -> None:
+        try:
+            self.sniff_urls_in_message(message, channel, source_nick)
+        except Exception as exc:
+            print(f"URL sniff worker failed: {exc}")
 
     def apply_flood_protection(self) -> None:
         now = time.monotonic()
@@ -895,7 +921,7 @@ class IRCBot:
                 self.handle_privmsg(source_nick, target, message)
 
     def handle_privmsg(self, source_nick: str, target: str, message: str) -> None:
-        self.sniff_urls_in_message(message, target, source_nick)
+        self.schedule_url_sniff(message, target, source_nick)
 
         if re.search(r"\bunreal\b", message, re.IGNORECASE):
             action_target = source_nick if target.lower() == self.current_nick.lower() else target
@@ -1192,6 +1218,15 @@ class IRCBot:
         except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
             return None
 
+    @staticmethod
+    def _is_timeout_error(exc: Exception) -> bool:
+        if isinstance(exc, TimeoutError):
+            return True
+        if isinstance(exc, URLError):
+            reason = str(getattr(exc, "reason", "")).lower()
+            return "timed out" in reason or "timeout" in reason
+        return "timed out" in str(exc).lower()
+
     def describe_url(self, url: str) -> dict[str, str | int | bool | None]:
         if self.is_youtube_url(url):
             youtube_result = self.fetch_youtube_metadata(url)
@@ -1257,7 +1292,7 @@ class IRCBot:
             "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id="
             f"{quote(video_id)}&key={quote(self.config.youtube_api_key)}"
         )
-        data = self.fetch_json(api_url)
+        data = self.fetch_json_with_timeout(api_url, self.config.url_timeout_seconds)
         if not data:
             return {"status": "error", "message": self.tr("yt_api_unreachable")}
 
@@ -1307,6 +1342,17 @@ class IRCBot:
             "description_text": self.extract_youtube_description(str(snippet.get("description", ""))),
             "title_missing": False,
         }
+
+    def fetch_json_with_timeout(self, url: str, timeout_seconds: float) -> dict[str, object] | None:
+        try:
+            request = Request(url, headers={"User-Agent": "Mozilla/5.0 IRCBot"})
+            with urlopen(request, timeout=timeout_seconds) as response:
+                payload = response.read()
+            decoded = payload.decode("utf-8", errors="replace")
+            parsed = json.loads(decoded)
+            return parsed
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+            return None
 
     def format_iso8601_duration(self, duration: str) -> str:
         match = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration)
@@ -1580,6 +1626,8 @@ class IRCBot:
             return
 
         status = str(result.get("status", ""))
+        if status == "discarded":
+            return
         if status == "blocked":
             self.send_privmsg(reply_target, self.tr("url_blocked"))
             return
@@ -1748,7 +1796,7 @@ class IRCBot:
 
         try:
             request = Request(url, headers={"User-Agent": "Mozilla/5.0 IRCBot"})
-            with urlopen(request, timeout=10) as response:
+            with urlopen(request, timeout=self.config.url_timeout_seconds) as response:
                 content_type = response.headers.get_content_type()
                 if content_type not in {"text/html", "application/xhtml+xml"}:
                     self.mark_deadlink(url)
@@ -1757,7 +1805,9 @@ class IRCBot:
                 raw_bytes = response.read(65536)
                 encoding = response.headers.get_content_charset() or "utf-8"
                 html_text = raw_bytes.decode(encoding, errors="replace")
-        except (HTTPError, URLError, TimeoutError, OSError):
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            if self._is_timeout_error(exc):
+                return {"status": "discarded", "url": url}
             self.mark_deadlink(url)
             return {"status": "deadlink", "url": url}
 

@@ -65,6 +65,7 @@
   "mysql_database": "nullbot",
   "weather_default_location": "",
   "youtube_api_key": "",
+  "url_timeout_seconds": 3.0,
   "flood_burst": 4,
   "flood_window_seconds": 2.0,
   "flood_min_interval_ms": 700
