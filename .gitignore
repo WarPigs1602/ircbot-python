@@ -1,0 +1,27 @@
+# Local configuration / secrets
+config.json
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache/artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Runtime / process files
+*.pid
+bot.pid
+
+# Logs
+*.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
