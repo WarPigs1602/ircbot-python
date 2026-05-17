@@ -1782,8 +1782,13 @@ class IRCBot:
 
         try:
             with server_conn.cursor() as cur:
+                # Database name is not directly parameterizable in MySQL.
+                # Only accept alphanumeric and underscore to prevent injection.
+                db_name = self.config.mysql_database
+                if not db_name or not all(c.isalnum() or c == '_' for c in db_name):
+                    raise ValueError(f"Invalid database name: {db_name}")
                 cur.execute(
-                    f"CREATE DATABASE IF NOT EXISTS `{self.config.mysql_database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                    f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
                 )
         except Exception as exc:
             print(self.tr("db_create_failed", error=exc))
@@ -1896,8 +1901,14 @@ class IRCBot:
         if conn is None:
             return
 
+        # Validate flag_name to prevent SQL injection (only allow safe column names)
+        allowed_flags = {"is_blocked", "is_deadlink"}
+        if flag_name not in allowed_flags:
+            return
+
         try:
             with conn.cursor() as cur:
+                # Column names cannot be parameterized, use only validated values
                 cur.execute(
                     f"UPDATE bot_url SET {flag_name} = 1 WHERE url = %s",
                     (url,),
