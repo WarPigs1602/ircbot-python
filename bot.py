@@ -57,6 +57,66 @@ SPAM_HOSTS = (
     "rebrand.ly",
 )
 
+DANGEROUS_CONTENT_TYPES = frozenset({
+    # Generic binaries
+    "application/octet-stream",
+    # Windows executables / installers
+    "application/x-msdownload",
+    "application/x-ms-dos-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-executable",
+    "application/x-msi",
+    "application/x-msdos-program",
+    # Scripts
+    "application/x-sh",
+    "application/x-csh",
+    "application/x-bash",
+    "application/x-perl",
+    "application/x-python-code",
+    "text/x-sh",
+    "text/x-bash",
+    "text/x-perl",
+    "text/x-python",
+    "text/x-ruby",
+    "application/x-ruby",
+    "application/x-bat",
+    "application/x-powershell",
+    "text/x-powershell",
+    # Archives / compressed
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/x-rar-compressed",
+    "application/vnd.rar",
+    "application/x-7z-compressed",
+    "application/x-tar",
+    "application/x-gzip",
+    "application/x-bzip2",
+    "application/x-xz",
+    "application/zstd",
+    "application/x-lzma",
+    # JVM / mobile
+    "application/java-archive",
+    "application/x-java-archive",
+    "application/vnd.android.package-archive",
+    # macOS
+    "application/x-apple-diskimage",
+    "application/x-macos-pkg",
+    # Linux packages
+    "application/x-deb",
+    "application/x-rpm",
+    # Office macros / legacy formats
+    "application/vnd.ms-excel.sheet.macroEnabled.12",
+    "application/vnd.ms-word.document.macroEnabled.12",
+    "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+    "application/vnd.ms-office",
+    # Flash (legacy, still seen in the wild)
+    "application/x-shockwave-flash",
+    # HTA / CHM
+    "application/x-ms-application",
+    "application/x-ms-xbap",
+    "application/vnd.ms-htmlhelp",
+})
+
 WEATHER_CODE_MAP_DE = {
     0: "klar",
     1: "ueberwiegend klar",
@@ -288,6 +348,8 @@ class IRCBot:
                 "url_not_found": "URL nicht gefunden.",
                 "url_blocked": "URL geblockt (Spamverdacht).",
                 "url_dead": "URL ist tot oder keine HTML-Seite.",
+                "url_no_html": "Hier ist kein HTML-Inhalt.",
+                "url_dangerous_file": "⚠ Sicherheitswarnung",
                 "url_too_large": "URL ist zu gross zum Sniffen.",
                 "url_max_id": "Max-ID {max_id}",
                 "url_error": "URL Fehler: {message}",
@@ -354,6 +416,8 @@ class IRCBot:
                 "url_not_found": "URL not found.",
                 "url_blocked": "URL blocked (suspected spam).",
                 "url_dead": "URL is dead or not an HTML page.",
+                "url_no_html": "There is no HTML content here.",
+                "url_dangerous_file": "⚠ Security warning",
                 "url_too_large": "URL is too large to sniff.",
                 "url_max_id": "Max ID {max_id}",
                 "url_error": "URL error: {message}",
@@ -1672,7 +1736,9 @@ class IRCBot:
             self.send_privmsg(reply_target, f"{self.tr('url_blocked')}{max_id_suffix}")
             return
         if status == "deadlink":
-            self.send_privmsg(reply_target, f"{self.tr('url_dead')}{max_id_suffix}")
+            http_status = self.safe_int(result.get("http_status"))
+            status_suffix = f" (HTTP {http_status})" if http_status is not None else ""
+            self.send_privmsg(reply_target, f"{self.tr('url_dead')}{status_suffix}{max_id_suffix}")
             return
         if status == "too_large":
             self.send_privmsg(reply_target, f"{self.tr('url_too_large')}{max_id_suffix}")
@@ -1739,6 +1805,18 @@ class IRCBot:
             return
         if title_missing:
             self.send_privmsg(reply_target, f"{id_prefix}{self.tr('url_without_title', url=url, topic=topic, requested_by=requested_by)}{max_id_suffix}")
+            return
+
+        is_dangerous = bool(result.get("is_dangerous", False)) or topic in DANGEROUS_CONTENT_TYPES
+        if is_dangerous:
+            if self.allows_control_codes(reply_target):
+                bold = "\x02"
+                red = "\x0304"
+                reset_code = "\x0f"
+                warn_label = f"{bold}{red}{self.tr('url_dangerous_file')}{reset_code}"
+            else:
+                warn_label = self.tr("url_dangerous_file")
+            self.send_privmsg(reply_target, f"{id_prefix}{url} :: {warn_label}: {topic} (Requested by {requested_by}){max_id_suffix}")
             return
 
         self.send_privmsg(reply_target, f"{id_prefix}{url} :: {topic} (Requested by {requested_by}){max_id_suffix}")
@@ -1881,6 +1959,35 @@ class IRCBot:
             return {"status": "blocked", "url": url}
 
         try:
+            head_request = Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 IRCBot"},
+                method="HEAD",
+            )
+            head_content_type: str | None = None
+            try:
+                with urlopen(head_request, timeout=self.config.url_timeout_seconds) as response:
+                    head_status = getattr(response, "status", None)
+                    head_content_type = response.headers.get_content_type()
+            except HTTPError as exc:
+                head_status = exc.code
+
+            if head_status is not None and head_status not in {405, 501} and not 200 <= head_status < 300:
+                self.mark_deadlink(url)
+                return {"status": "deadlink", "url": url, "http_status": head_status}
+
+            if head_status not in {405, 501} and head_content_type is not None and head_content_type not in {"text/html", "application/xhtml+xml"}:
+                is_dangerous = head_content_type in DANGEROUS_CONTENT_TYPES
+                return {
+                    "status": "ok",
+                    "url": url,
+                    "topic": head_content_type,
+                    "title_missing": False,
+                    "content_type": head_content_type,
+                    "is_dangerous": is_dangerous,
+                    "http_status": head_status,
+                }
+
             max_sniff_bytes = self.config.url_sniff_max_bytes
             request = Request(
                 url,
@@ -1890,20 +1997,16 @@ class IRCBot:
                 },
             )
             with urlopen(request, timeout=self.config.url_timeout_seconds) as response:
-                content_type = response.headers.get_content_type()
-                if content_type not in {"text/html", "application/xhtml+xml"}:
-                    self.mark_deadlink(url)
-                    return {"status": "deadlink", "url": url}
-
-                content_length = self.safe_int(response.headers.get("Content-Length"))
+                response_headers = response.headers
+                content_length = self.safe_int(response_headers.get("Content-Length"))
                 if content_length is not None and content_length > self.config.url_max_content_length_bytes:
-                    return {"status": "too_large", "url": url}
+                    return {"status": "too_large", "url": url, "http_status": getattr(response, "status", None)}
 
                 raw_bytes = response.read(max_sniff_bytes + 1)
                 if len(raw_bytes) > max_sniff_bytes:
                     return {"status": "too_large", "url": url}
 
-                encoding = response.headers.get_content_charset() or "utf-8"
+                encoding = response_headers.get_content_charset() or "utf-8"
                 html_text = raw_bytes.decode(encoding, errors="replace")
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             if self._is_timeout_error(exc):
