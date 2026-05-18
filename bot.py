@@ -143,6 +143,8 @@ class BotConfig:
     network_key: str = ""
     reconnect_delay_seconds: int = 30
     url_timeout_seconds: float = 3.0
+    url_sniff_max_bytes: int = 65536
+    url_max_content_length_bytes: int = 2097152
 
     @staticmethod
     def _from_raw(raw: dict[str, object]) -> "BotConfig":
@@ -200,6 +202,8 @@ class BotConfig:
             network_key=network_key,
             reconnect_delay_seconds=max(1, int(raw.get("reconnect_delay_seconds", 30))),
             url_timeout_seconds=max(0.5, float(raw.get("url_timeout_seconds", 3.0))),
+            url_sniff_max_bytes=max(1024, int(raw.get("url_sniff_max_bytes", 65536))),
+            url_max_content_length_bytes=max(65536, int(raw.get("url_max_content_length_bytes", 2097152))),
         )
 
     @staticmethod
@@ -280,9 +284,12 @@ class IRCBot:
                 "usage_dart": "Nutzung: {prefix}{command} <nick>",
                 "usage_weather": "Nutzung: {prefix}{command} <ort>",
                 "usage_url": "Nutzung: {prefix}{command} <id>",
+                "usage_url_with_max": "Nutzung: {prefix}{command} <id> (max: {max_id})",
                 "url_not_found": "URL nicht gefunden.",
                 "url_blocked": "URL geblockt (Spamverdacht).",
                 "url_dead": "URL ist tot oder keine HTML-Seite.",
+                "url_too_large": "URL ist zu gross zum Sniffen.",
+                "url_max_id": "Max-ID {max_id}",
                 "url_error": "URL Fehler: {message}",
                 "url_no_html_topic": "{url} (kein HTML-Topic gefunden)",
                 "url_without_title": "{url} :: {topic} (ohne title) (Requested by {requested_by})",
@@ -343,9 +350,12 @@ class IRCBot:
                 "usage_dart": "Usage: {prefix}{command} <nick>",
                 "usage_weather": "Usage: {prefix}{command} <location>",
                 "usage_url": "Usage: {prefix}{command} <id>",
+                "usage_url_with_max": "Usage: {prefix}{command} <id> (max: {max_id})",
                 "url_not_found": "URL not found.",
                 "url_blocked": "URL blocked (suspected spam).",
                 "url_dead": "URL is dead or not an HTML page.",
+                "url_too_large": "URL is too large to sniff.",
+                "url_max_id": "Max ID {max_id}",
                 "url_error": "URL error: {message}",
                 "url_no_html_topic": "{url} (no HTML topic found)",
                 "url_without_title": "{url} :: {topic} (without title) (Requested by {requested_by})",
@@ -1011,22 +1021,28 @@ class IRCBot:
 
         if command == "url":
             if not arg.strip():
-                self.send_privmsg(reply_target, self.tr("usage_url", prefix=prefix, command=self.primary_command_name("url")))
+                self.send_privmsg(reply_target, self.build_url_usage_text(prefix))
                 return
 
             url_id = self.parse_int(arg.strip())
             if url_id is None:
-                self.send_privmsg(reply_target, self.tr("usage_url", prefix=prefix, command=self.primary_command_name("url")))
+                self.send_privmsg(reply_target, self.build_url_usage_text(prefix))
                 return
 
             result = self.fetch_url_by_id(url_id)
-            self.handle_url_result(result, reply_target, requested_by=source_nick)
+            self.handle_url_result(result, reply_target, requested_by=source_nick, show_max_id=True)
             return
 
         if command == "randomurl":
             result = self.fetch_random_url()
-            self.handle_url_result(result, reply_target, requested_by=source_nick)
+            self.handle_url_result(result, reply_target, requested_by=source_nick, show_max_id=True)
             return
+
+    def build_url_usage_text(self, prefix: str) -> str:
+        max_id = self.get_max_url_id()
+        if max_id is None:
+            return self.tr("usage_url", prefix=prefix, command=self.primary_command_name("url"))
+        return self.tr("usage_url_with_max", prefix=prefix, command=self.primary_command_name("url"), max_id=max_id)
 
     def get_weather_text(self, location_query: str, command_prefix: str, reply_target: str) -> str:
         location = location_query.strip() or self.config.weather_default_location.strip()
@@ -1601,15 +1617,21 @@ class IRCBot:
         return self.tr("dart_top", items=" | ".join(leaderboard))
 
     def sniff_urls_in_message(self, message: str, channel: str, source_nick: str) -> None:
+        seen_in_message: set[str] = set()
         for raw_url in URL_PATTERN.findall(message):
             normalized_url = self.normalize_url(raw_url)
-            if not normalized_url or normalized_url in self.seen_sniffed_urls:
+            if not normalized_url or normalized_url in seen_in_message:
                 continue
 
-            self.seen_sniffed_urls.add(normalized_url)
+            seen_in_message.add(normalized_url)
             record = self.fetch_url_by_value(normalized_url)
             if record and self.is_flagged(record):
                 continue
+            if record:
+                cached_result = self.build_cached_url_result(record)
+                if cached_result:
+                    self.handle_url_result(cached_result, channel, requested_by=source_nick, show_max_id=True)
+                    continue
 
             if self.is_spammy(normalized_url):
                 self.block_url(normalized_url)
@@ -1617,26 +1639,50 @@ class IRCBot:
 
             topic_result = self.describe_url(normalized_url)
             if topic_result.get("status") == "ok":
-                self.store_url_if_missing(normalized_url, source_nick)
-            self.handle_url_result(topic_result, channel, requested_by=source_nick)
+                stored_url_id = self.store_url_if_missing(
+                    normalized_url,
+                    source_nick,
+                    topic=str(topic_result.get("topic", "")) or None,
+                    title_missing=bool(topic_result.get("title_missing", False)),
+                )
+                if stored_url_id is not None:
+                    topic_result["id"] = stored_url_id
+            self.handle_url_result(topic_result, channel, requested_by=source_nick, show_max_id=True)
 
-    def handle_url_result(self, result: dict[str, str | int | bool | None] | None, reply_target: str, requested_by: str) -> None:
+    def handle_url_result(
+        self,
+        result: dict[str, str | int | bool | None] | None,
+        reply_target: str,
+        requested_by: str,
+        show_max_id: bool = False,
+    ) -> None:
+        max_id = self.safe_int(result.get("max_id")) if (result and show_max_id) else None
+        if show_max_id and max_id is None:
+            max_id = self.get_max_url_id()
+        max_id_suffix = f" | {self.tr('url_max_id', max_id=max_id)}" if max_id is not None else ""
+
         if not result:
-            self.send_privmsg(reply_target, self.tr("url_not_found"))
+            self.send_privmsg(reply_target, f"{self.tr('url_not_found')}{max_id_suffix}")
             return
 
         status = str(result.get("status", ""))
         if status == "discarded":
             return
         if status == "blocked":
-            self.send_privmsg(reply_target, self.tr("url_blocked"))
+            self.send_privmsg(reply_target, f"{self.tr('url_blocked')}{max_id_suffix}")
             return
         if status == "deadlink":
-            self.send_privmsg(reply_target, self.tr("url_dead"))
+            self.send_privmsg(reply_target, f"{self.tr('url_dead')}{max_id_suffix}")
+            return
+        if status == "too_large":
+            self.send_privmsg(reply_target, f"{self.tr('url_too_large')}{max_id_suffix}")
             return
         if status == "error":
-            self.send_privmsg(reply_target, self.tr("url_error", message=result.get("message", self.tr("unknown"))))
+            self.send_privmsg(reply_target, f"{self.tr('url_error', message=result.get('message', self.tr('unknown')))}{max_id_suffix}")
             return
+
+        url_id = self.safe_int(result.get("id"))
+        id_prefix = f"[#{url_id}] " if url_id is not None else ""
 
         if str(result.get("kind", "")) == "youtube":
             title = str(result.get("topic", ""))
@@ -1650,7 +1696,7 @@ class IRCBot:
             if self.allows_control_codes(reply_target):
                 self.send_privmsg(
                     reply_target,
-                    self.format_youtube_with_control_codes(
+                    f"{id_prefix}" + self.format_youtube_with_control_codes(
                         title=title,
                         channel_title=channel_title,
                         duration_text=duration_text,
@@ -1659,7 +1705,7 @@ class IRCBot:
                         like_count=like_count,
                         comment_count=comment_count,
                         requested_by=requested_by,
-                    ),
+                    ) + max_id_suffix,
                 )
                 return
 
@@ -1678,7 +1724,7 @@ class IRCBot:
                 parts.append(self.tr("yt_comments", count=comment_count))
 
             suffix = f" ({' | '.join(parts)})" if parts else ""
-            self.send_privmsg(reply_target, f"YouTube :: {title}{suffix} (Requested by {requested_by})")
+            self.send_privmsg(reply_target, f"{id_prefix}YouTube :: {title}{suffix} (Requested by {requested_by}){max_id_suffix}")
             return
 
         url = str(result.get("url", ""))
@@ -1689,13 +1735,13 @@ class IRCBot:
             return
 
         if not topic:
-            self.send_privmsg(reply_target, self.tr("url_no_html_topic", url=url))
+            self.send_privmsg(reply_target, f"{id_prefix}{self.tr('url_no_html_topic', url=url)}{max_id_suffix}")
             return
         if title_missing:
-            self.send_privmsg(reply_target, self.tr("url_without_title", url=url, topic=topic, requested_by=requested_by))
+            self.send_privmsg(reply_target, f"{id_prefix}{self.tr('url_without_title', url=url, topic=topic, requested_by=requested_by)}{max_id_suffix}")
             return
 
-        self.send_privmsg(reply_target, f"{url} :: {topic} (Requested by {requested_by})")
+        self.send_privmsg(reply_target, f"{id_prefix}{url} :: {topic} (Requested by {requested_by}){max_id_suffix}")
 
     def fetch_url_by_id(self, url_id: int) -> dict[str, str | int | bool | None] | None:
         if pymysql is None:
@@ -1708,7 +1754,7 @@ class IRCBot:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink FROM bot_url WHERE id = %s LIMIT 1",
+                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE id = %s LIMIT 1",
                     (url_id,),
                 )
                 row = cur.fetchone()
@@ -1725,8 +1771,21 @@ class IRCBot:
         if int(row.get("is_deadlink", 0)):
             return {"status": "deadlink", "url": str(row.get("url", ""))}
 
+        cached_result = self.build_cached_url_result(row)
+        if cached_result:
+            cached_result["max_id"] = self.get_max_url_id()
+            return cached_result
+
         topic_result = self.describe_url(str(row.get("url", "")))
         if topic_result and topic_result.get("status") == "ok":
+            topic_result["id"] = int(row.get("id", url_id))
+            topic_result["max_id"] = self.get_max_url_id()
+            self.store_url_if_missing(
+                str(row.get("url", "")),
+                str(row.get("posted_by", "")),
+                topic=str(topic_result.get("topic", "")) or None,
+                title_missing=bool(topic_result.get("title_missing", False)),
+            )
             return topic_result
         if topic_result and topic_result.get("status") == "blocked":
             return topic_result
@@ -1746,14 +1805,27 @@ class IRCBot:
             with conn.cursor() as cur:
                 for _ in range(10):
                     cur.execute(
-                        "SELECT id, url, posted_by, time, is_blocked, is_deadlink FROM bot_url WHERE is_blocked = 0 AND is_deadlink = 0 ORDER BY RAND() LIMIT 1"
+                        "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE is_blocked = 0 AND is_deadlink = 0 ORDER BY RAND() LIMIT 1"
                     )
                     row = cur.fetchone()
                     if not row:
                         return None
 
+                    cached_result = self.build_cached_url_result(row)
+                    if cached_result:
+                        cached_result["max_id"] = self.get_max_url_id()
+                        return cached_result
+
                     topic_result = self.describe_url(str(row.get("url", "")))
                     if topic_result.get("status") == "ok":
+                        topic_result["id"] = int(row.get("id", 0))
+                        topic_result["max_id"] = self.get_max_url_id()
+                        self.store_url_if_missing(
+                            str(row.get("url", "")),
+                            str(row.get("posted_by", "")),
+                            topic=str(topic_result.get("topic", "")) or None,
+                            title_missing=bool(topic_result.get("title_missing", False)),
+                        )
                         return topic_result
                     if topic_result.get("status") == "error":
                         return topic_result
@@ -1775,7 +1847,7 @@ class IRCBot:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink FROM bot_url WHERE url = %s ORDER BY id DESC LIMIT 1",
+                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE url = %s ORDER BY id DESC LIMIT 1",
                     (url,),
                 )
                 row = cur.fetchone()
@@ -1789,20 +1861,48 @@ class IRCBot:
 
         return row
 
+    def build_cached_url_result(self, row: dict[str, str | int | bool | None]) -> dict[str, str | int | bool | None] | None:
+        topic_value = row.get("topic")
+        topic = str(topic_value).strip() if topic_value is not None else ""
+        if not topic:
+            return None
+
+        return {
+            "status": "ok",
+            "id": self.safe_int(row.get("id")),
+            "url": str(row.get("url", "")),
+            "topic": topic,
+            "title_missing": bool(int(row.get("title_missing", 0) or 0)),
+        }
+
     def fetch_url_topic(self, url: str) -> dict[str, str | int | bool | None]:
         if self.is_spammy(url):
             self.block_url(url)
             return {"status": "blocked", "url": url}
 
         try:
-            request = Request(url, headers={"User-Agent": "Mozilla/5.0 IRCBot"})
+            max_sniff_bytes = self.config.url_sniff_max_bytes
+            request = Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 IRCBot",
+                    "Range": f"bytes=0-{max_sniff_bytes - 1}",
+                },
+            )
             with urlopen(request, timeout=self.config.url_timeout_seconds) as response:
                 content_type = response.headers.get_content_type()
                 if content_type not in {"text/html", "application/xhtml+xml"}:
                     self.mark_deadlink(url)
                     return {"status": "deadlink", "url": url}
 
-                raw_bytes = response.read(65536)
+                content_length = self.safe_int(response.headers.get("Content-Length"))
+                if content_length is not None and content_length > self.config.url_max_content_length_bytes:
+                    return {"status": "too_large", "url": url}
+
+                raw_bytes = response.read(max_sniff_bytes + 1)
+                if len(raw_bytes) > max_sniff_bytes:
+                    return {"status": "too_large", "url": url}
+
                 encoding = response.headers.get_content_charset() or "utf-8"
                 html_text = raw_bytes.decode(encoding, errors="replace")
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
@@ -1822,27 +1922,51 @@ class IRCBot:
 
         return {"status": "ok", "url": url, "topic": topic, "title_missing": title_missing}
 
-    def store_url_if_missing(self, url: str, posted_by: str) -> None:
+    def store_url_if_missing(self, url: str, posted_by: str, topic: str | None = None, title_missing: bool = False) -> int | None:
         conn = self.open_db_connection()
         if conn is None:
-            return
+            return None
 
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT id FROM bot_url WHERE url = %s LIMIT 1", (url,))
-                if cur.fetchone():
-                    return
+                existing_row = cur.fetchone()
+                if existing_row:
+                    if topic:
+                        cur.execute(
+                            "UPDATE bot_url SET topic = %s, title_missing = %s WHERE url = %s",
+                            (topic[:180], 1 if title_missing else 0, url),
+                        )
+                    return self.safe_int(existing_row.get("id"))
 
                 cur.execute("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM bot_url")
                 next_row = cur.fetchone() or {}
                 next_id = int(next_row.get("next_id", 1))
 
                 cur.execute(
-                    "INSERT INTO bot_url (id, url, posted_by, time, is_blocked, is_deadlink) VALUES (%s, %s, %s, %s, 0, 0)",
-                    (next_id, url, posted_by, self.current_time_string()),
+                    "INSERT INTO bot_url (id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing) VALUES (%s, %s, %s, %s, 0, 0, %s, %s)",
+                    (next_id, url, posted_by, self.current_time_string(), (topic[:180] if topic else None), 1 if title_missing else 0),
                 )
+                return next_id
         except Exception:
-            pass
+            return None
+        finally:
+            conn.close()
+
+        return None
+
+    def get_max_url_id(self) -> int | None:
+        conn = self.open_db_connection()
+        if conn is None:
+            return None
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(id) AS max_id FROM bot_url")
+                row = cur.fetchone() or {}
+                return self.safe_int(row.get("max_id"))
+        except Exception:
+            return None
         finally:
             conn.close()
 
@@ -1978,11 +2102,14 @@ class IRCBot:
                         time VARCHAR(32) NOT NULL DEFAULT '',
                         is_blocked TINYINT(1) NOT NULL DEFAULT 0,
                         is_deadlink TINYINT(1) NOT NULL DEFAULT 0,
+                        topic VARCHAR(180) NULL,
+                        title_missing TINYINT(1) NOT NULL DEFAULT 0,
                         PRIMARY KEY (id),
                         KEY idx_bot_url_flags (is_blocked, is_deadlink)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """
                 )
+                self.ensure_bot_url_schema(cur)
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS bot_channels (
@@ -1998,6 +2125,22 @@ class IRCBot:
             print(self.tr("db_table_setup_failed", error=exc))
         finally:
             conn.close()
+
+    def ensure_bot_url_schema(self, cur) -> None:
+        cur.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'bot_url'
+            """,
+            (self.config.mysql_database,),
+        )
+        existing_columns = {str(row.get("COLUMN_NAME", "")) for row in (cur.fetchall() or [])}
+
+        if "topic" not in existing_columns:
+            cur.execute("ALTER TABLE bot_url ADD COLUMN topic VARCHAR(180) NULL")
+        if "title_missing" not in existing_columns:
+            cur.execute("ALTER TABLE bot_url ADD COLUMN title_missing TINYINT(1) NOT NULL DEFAULT 0")
 
     def load_saved_channels(self) -> list[str]:
         conn = self.open_db_connection()
