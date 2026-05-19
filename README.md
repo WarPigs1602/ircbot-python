@@ -2,6 +2,37 @@
 
 A Python IRC bot with reconnect logic, a plugin-based command and trigger system, URL sniffing, weather lookup, and optional YouTube metadata.
 
+## Contents
+- [Quick Start](#quick-start)
+- [Features](#features)
+- [Plugin System](#plugin-system)
+- [Example Basic Plugin](#example-basic-plugin)
+- [Example Trigger Plugin](#example-trigger-plugin)
+- [Requirements](#requirements)
+- [Installation (Linux)](#installation-linux)
+- [Installation (Windows)](#installation-windows)
+- [Running the Bot](#running-the-bot)
+- [Windows Example Function (PowerShell)](#windows-example-function-powershell)
+- [Commands](#commands)
+- [Admin PM Commands](#admin-pm-commands)
+- [URL and YouTube Behavior](#url-and-youtube-behavior)
+- [Weather Behavior](#weather-behavior)
+- [Database Setup](#database-setup)
+- [Nickname Handling](#nickname-handling)
+- [Configuration Example](#configuration-example)
+- [License](#license)
+
+## Quick Start
+1. Copy `config.example.json` to `config.json`.
+2. Set at least one enabled network with `server`, `nick`, and `channels`.
+3. Install dependencies:
+  - with `venv`: `python -m pip install -r requirements.txt`
+  - without `venv` on Linux: install `PyMySQL` for the system Python interpreter
+4. Start the bot:
+  - Linux: `./bot.py` or `python3 bot.py`
+  - Windows: `python bot.py`
+5. Use [Admin PM Commands](#admin-pm-commands) in a private message if you need administrative setup.
+
 ## Features
 - TLS connection support (`use_tls`, enabled by default)
 - Multi-network support via required `networks` array (one bot connection per entry)
@@ -168,6 +199,10 @@ For a small real example, see `plugins/unreal/plugin.py`.
 ## Requirements
 - Python 3.10+
 - MySQL/MariaDB (required for dart stats, URL storage, and persistent channels)
+
+Setup paths:
+- Use a virtual environment if you want isolated Python packages.
+- Use the system Python only if `PyMySQL` is installed for that exact interpreter.
 
 ## Installation (Linux)
 1. Open the project folder:
