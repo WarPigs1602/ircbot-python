@@ -52,6 +52,118 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
   - `unreal`
   - `urlsniffer`
 
+## Example Basic Plugin
+A minimal command plugin consists of:
+
+- a folder under `plugins/`
+- a `plugin.py` file
+- one or more handler functions with the signature `handler(bot, context, arg)`
+- a final `PLUGIN = PluginSpec(...)` export
+
+Example structure:
+
+```text
+plugins/
+  hello/
+    plugin.py
+```
+
+Example implementation:
+
+```python
+from plugin_system import CommandSpec, PluginSpec
+
+
+def handle_hello(bot, context, arg: str) -> None:
+    target = arg.strip() if arg.strip() else context.source_nick
+    bot.send_privmsg(context.reply_target, f"Hello {target}!")
+
+
+PLUGIN = PluginSpec(
+    name="hello",
+    commands=(
+        CommandSpec(canonical="hello", handler=handle_hello, help_sort=30),
+    ),
+)
+```
+
+How it works:
+
+- `name` is the internal plugin name used by `enabled_plugins` / `disabled_plugins`.
+- `canonical` is the command token the bot resolves after the normal prefix, so the example becomes `!hello`.
+- `context.source_nick` is the nickname of the user who sent the command.
+- `context.reply_target` is automatically the channel or the sender nick in a private message.
+- `arg` contains everything after the command name.
+- `bot.send_privmsg(...)` sends the response back to IRC.
+
+Useful context fields:
+
+- `context.source_nick`
+- `context.target`
+- `context.message`
+- `context.reply_target`
+- `context.command_prefix`
+- `context.is_private_message`
+
+Useful bot helpers:
+
+- `bot.send_privmsg(target, message)`
+- `bot.send_notice(target, message)`
+- `bot.send_action(target, message)`
+- `bot.primary_command_name("...")`
+- `bot.tr("...")` for translated plugin messages
+
+For a very small real example, see the existing ping plugin in `plugins/ping/plugin.py`.
+
+## Example Trigger Plugin
+A trigger plugin reacts to normal chat messages without requiring the command prefix.
+
+Example structure:
+
+```text
+plugins/
+  cheer/
+  plugin.py
+```
+
+Example implementation:
+
+```python
+import re
+
+from plugin_system import MessageHandlerSpec, PluginSpec
+
+
+def handle_cheer(bot, context) -> None:
+  if re.search(r"\bgg\b", context.message, re.IGNORECASE):
+    bot.send_action(context.reply_target, "cheers loudly!")
+
+
+PLUGIN = PluginSpec(
+  name="cheer",
+  message_handlers=(
+    MessageHandlerSpec(handler=handle_cheer),
+  ),
+)
+```
+
+How it works:
+
+- `message_handlers` are called for every incoming `PRIVMSG`.
+- A trigger plugin decides on its own whether it wants to react.
+- `context.message` contains the full incoming text.
+- `context.reply_target` is the channel in public chat and the sender nick in private chat.
+- `bot.send_action(...)` sends a CTCP ACTION, similar to `/me` in IRC clients.
+
+Typical uses:
+
+- keyword reactions
+- automatic helper replies
+- moderation or logging hooks
+- URL or content sniffing
+
+For a small real example, see `plugins/unreal/plugin.py`.
+
 ## Requirements
 - Python 3.10+
 - MySQL/MariaDB (required for dart stats, URL storage, and persistent channels)
