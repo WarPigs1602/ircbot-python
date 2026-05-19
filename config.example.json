@@ -19,6 +19,7 @@
         "MODE {nick} +B"
       ],
       "reconnect_delay_seconds": 30,
+      "raw_chat_logging_enabled": false,
       "sasl_enabled": false,
       "sasl_username": "",
       "sasl_password": "",
@@ -47,6 +48,7 @@
         "MODE {nick} +B"
       ],
       "reconnect_delay_seconds": 30,
+      "raw_chat_logging_enabled": false,
       "sasl_enabled": false,
       "sasl_username": "",
       "sasl_password": "",
@@ -67,6 +69,7 @@
   "youtube_api_key": "",
   "enabled_plugins": [],
   "disabled_plugins": [],
+  "raw_chat_logging_enabled": false,
   "url_timeout_seconds": 3.0,
   "url_sniff_max_bytes": 65536,
   "url_max_content_length_bytes": 2097152,

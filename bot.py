@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import json
 import base64
 import argparse
@@ -174,6 +176,7 @@ class BotConfig:
     oidentd_conf: str = ""
     network_key: str = ""
     reconnect_delay_seconds: int = 30
+    raw_chat_logging_enabled: bool = False
     url_timeout_seconds: float = 3.0
     url_sniff_max_bytes: int = 65536
     url_max_content_length_bytes: int = 2097152
@@ -242,6 +245,7 @@ class BotConfig:
             oidentd_conf=str(raw.get("oidentd_conf", "")).strip(),
             network_key=network_key,
             reconnect_delay_seconds=max(1, int(raw.get("reconnect_delay_seconds", 30))),
+            raw_chat_logging_enabled=bool(raw.get("raw_chat_logging_enabled", False)),
             url_timeout_seconds=max(0.5, float(raw.get("url_timeout_seconds", 3.0))),
             url_sniff_max_bytes=max(1024, int(raw.get("url_sniff_max_bytes", 65536))),
             url_max_content_length_bytes=max(65536, int(raw.get("url_max_content_length_bytes", 2097152))),
@@ -439,6 +443,28 @@ class IRCBot:
             payload = (line + "\r\n").encode("utf-8")
             self.sock.sendall(payload)
             print(f">>> {line}")
+            self.log_chat_raw_line(line)
+
+    @staticmethod
+    def sanitize_network_key_for_filename(network_key: str) -> str:
+        sanitized = re.sub(r'[^A-Za-z0-9._-]+', "_", network_key.strip())
+        return sanitized or "network"
+
+    def chat_log_path(self) -> Path:
+        filename = f"chat-{self.sanitize_network_key_for_filename(self.config.network_key)}.log"
+        return Path("log") / filename
+
+    def log_chat_raw_line(self, line: str) -> None:
+        if not self.config.raw_chat_logging_enabled:
+            return
+
+        try:
+            timestamp_ms = int(time.time() * 1000)
+            log_path = self.chat_log_path()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.open("a", encoding="utf-8").write(f"{timestamp_ms} {line}\n")
+        except OSError:
+            pass
 
     def send_privmsg(self, target: str, message: str) -> None:
         with self._send_lock:
@@ -848,6 +874,7 @@ class IRCBot:
                 continue
 
             print(f"<<< {line}")
+            self.log_chat_raw_line(line)
 
             if line.startswith("PING "):
                 self.send_raw("PONG " + line[5:])
@@ -880,6 +907,7 @@ class IRCBot:
             if command == "001":
                 self.send_nickserv_identify()
                 self.try_reclaim_preferred_nick(force=True)
+                self.complete_startup_actions()
                 continue
 
             if command in {"376", "422"}:

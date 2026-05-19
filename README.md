@@ -20,6 +20,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
 - Optional `perform` commands after successful connect (for example: user mode)
 - Role-based channel rights (`+q +a +o +h +v`) according to server-advertised `PREFIX` support, applied on login with the highest configured level
 - Optional admin raw command forwarding via PM trigger
+- Optional raw logging per network to `log/chat-<network_key>.log`
 - URL sniffing in channel messages:
   - Detects posted `http/https` links
   - Fetches HTML title / first heading topic
@@ -180,9 +181,24 @@ For a small real example, see `plugins/unreal/plugin.py`.
   - Define `networks` (required) and set per-network values (`server`, `port`, `use_tls`, `nick`, `channels`, ...)
   - Top-level values act as defaults for all entries in `networks`
   - Database settings: `mysql_host`, `mysql_port`, `mysql_user`, `mysql_password`, `mysql_database`
-  - Optional: `weather_default_location`, `youtube_api_key`, `language`, `enabled_plugins`, `disabled_plugins`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
+  - Optional: `weather_default_location`, `youtube_api_key`, `language`, `enabled_plugins`, `disabled_plugins`, `raw_chat_logging_enabled`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
 5. Install dependencies:
   - `python -m pip install -r requirements.txt`
+
+Linux without virtual environment:
+
+- Ubuntu / Debian:
+  - `sudo apt update`
+  - `sudo apt install python3-pymysql`
+- Fedora:
+  - `sudo dnf install python3-PyMySQL`
+- Then run the bot with your system Python, for example:
+  - `./bot.py`
+
+Note:
+
+- If you run the bot without `venv`, `PyMySQL` must be installed for the same Python interpreter that starts `bot.py`.
+- If you prefer `pip` without `venv`, use `python3 -m pip install --user -r requirements.txt` instead of the distro package.
 
 ## Installation (Windows)
 1. Open the project folder:
@@ -268,6 +284,7 @@ Notes:
 - New users default to the non-admin `user` role; channel rights can be assigned per role or per user and are only applied while the matching user is logged in.
 - If multiple rights are configured for the same channel, the bot only applies the highest supported mode.
 - Supported member modes are limited to what the IRC server advertises via `005 PREFIX=...`.
+- If `raw_chat_logging_enabled` is enabled for a network, all incoming and outgoing IRC raw lines are appended to `log/chat-<network_key>.log` in the format `<unix_timestamp_ms> <raw_irc_line>`, for example `1539452142405 NOTICE AUTH :*** Looking up your hostname`.
 - If `!dart` has no argument, the caller nickname is used.
 - `!lag` measures latency in nanoseconds and displays a readable millisecond value (for sub-millisecond latency as decimal, e.g. `0.123 ms`) plus raw `ns` in parentheses.
 - If `weather_default_location` is set, weather can be requested without arguments.
@@ -355,6 +372,11 @@ See `config.example.json` for all available options, including:
 - Plugin control:
   - `enabled_plugins` loads only the listed plugins for a network when not empty
   - `disabled_plugins` excludes listed plugins when `enabled_plugins` is empty
+- Optional raw chat logging:
+  - `raw_chat_logging_enabled` enables per-network raw logs for all IRC lines
+  - the bot creates a `log` directory automatically when needed
+  - log files are written as `log/chat-<network_key>.log`
+  - top-level value acts as default; each network entry can override it
 
 ## License
 This project is licensed under the MIT License. See `LICENSE` for details.
