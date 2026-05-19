@@ -141,6 +141,7 @@ Notes:
 ## Weather Behavior
 - Uses Open-Meteo geocoding + forecast API.
 - Supports German postal code lookup fallback.
+- Place names and decimal formatting follow the configured bot language (`de`/`en`).
 - Returns temperature, "feels like", humidity, precipitation, and wind.
 - In channels without mode `+c`, the bot can use IRC control codes (bold/color) for richer output.
 

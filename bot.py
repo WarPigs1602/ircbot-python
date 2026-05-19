@@ -342,6 +342,7 @@ class IRCBot:
                 "usage_echo": "Nutzung: {prefix}{command} <text>",
                 "usage_slap": "Nutzung: {prefix}{command} <nick>",
                 "usage_dart": "Nutzung: {prefix}{command} <nick>",
+                "self_target": "sich selbst",
                 "usage_weather": "Nutzung: {prefix}{command} <ort>",
                 "usage_url": "Nutzung: {prefix}{command} <id>",
                 "usage_url_with_max": "Nutzung: {prefix}{command} <id> (max: {max_id})",
@@ -410,6 +411,7 @@ class IRCBot:
                 "usage_echo": "Usage: {prefix}{command} <text>",
                 "usage_slap": "Usage: {prefix}{command} <nick>",
                 "usage_dart": "Usage: {prefix}{command} <nick>",
+                "self_target": "themselves",
                 "usage_weather": "Usage: {prefix}{command} <location>",
                 "usage_url": "Usage: {prefix}{command} <id>",
                 "usage_url_with_max": "Usage: {prefix}{command} <id> (max: {max_id})",
@@ -803,6 +805,22 @@ class IRCBot:
         text = f"{lag_ns:,}"
         return text.replace(",", ".") if self.config.language == "de" else text
 
+    def format_localized_number(self, value: object) -> str:
+        if value is None:
+            return "n/a"
+
+        if isinstance(value, bool):
+            return str(value)
+
+        if isinstance(value, int):
+            text = str(value)
+        elif isinstance(value, float):
+            text = str(int(value)) if value.is_integer() else f"{value:.1f}"
+        else:
+            text = str(value)
+
+        return text.replace(".", ",") if self.config.language == "de" else text
+
     def end_cap_negotiation(self) -> None:
         if self.cap_negotiation_active:
             self.send_raw("CAP END")
@@ -1022,12 +1040,12 @@ class IRCBot:
 
         if command == "ping":
             target_nick = arg.strip() if arg.strip() else source_nick
-            self.send_action(reply_target, f"slaps {target_nick} around a bit with a large !pong")
+            self.send_action(reply_target, f"slaps {self.format_target_nick(target_nick)} around a bit with a large !pong")
             return
 
         if command == "pong":
             target_nick = arg.strip() if arg.strip() else source_nick
-            self.send_action(reply_target, f"slaps {target_nick} around a bit with a large !ping")
+            self.send_action(reply_target, f"slaps {self.format_target_nick(target_nick)} around a bit with a large !ping")
             return
 
         if command == "lag":
@@ -1108,6 +1126,11 @@ class IRCBot:
             return self.tr("usage_url", prefix=prefix, command=self.primary_command_name("url"))
         return self.tr("usage_url_with_max", prefix=prefix, command=self.primary_command_name("url"), max_id=max_id)
 
+    def format_target_nick(self, target_nick: str) -> str:
+        if target_nick.lower() == self.current_nick.lower():
+            return self.tr("self_target")
+        return target_nick
+
     def get_weather_text(self, location_query: str, command_prefix: str, reply_target: str) -> str:
         location = location_query.strip() or self.config.weather_default_location.strip()
         if not location:
@@ -1143,6 +1166,11 @@ class IRCBot:
         wind_direction = current.get("wind_direction_10m")
         weather_map = WEATHER_CODE_MAP_EN if self.config.language == "en" else WEATHER_CODE_MAP_DE
         condition = weather_map.get(int(weather_code), f"Code {weather_code}") if weather_code is not None else self.tr("unknown")
+        temperature_text = self.format_localized_number(temperature)
+        feels_like_text = self.format_localized_number(feels_like)
+        humidity_text = self.format_localized_number(humidity)
+        precipitation_text = self.format_localized_number(precipitation)
+        wind_speed_text = self.format_localized_number(wind_speed)
 
         place_name = place.get("name", location)
         admin1 = place.get("admin1")
@@ -1168,12 +1196,12 @@ class IRCBot:
         return self.tr(
             "weather_for",
             location=display_place,
-            temperature=temperature,
+            temperature=temperature_text,
             condition=condition,
-            feels_like=feels_like,
-            humidity=humidity,
-            precipitation=precipitation,
-            wind_speed=wind_speed,
+            feels_like=feels_like_text,
+            humidity=humidity_text,
+            precipitation=precipitation_text,
+            wind_speed=wind_speed_text,
         )
 
     def resolve_weather_location(self, location: str) -> dict[str, object] | None:
@@ -1200,7 +1228,7 @@ class IRCBot:
                     return {
                         "name": place_name or postal_code,
                         "admin1": state,
-                        "country": str(zip_data.get("country", "Deutschland")),
+                        "country": str(zip_data.get("country", "Germany" if self.config.language == "en" else "Deutschland")),
                         "latitude": latitude,
                         "longitude": longitude,
                     }
@@ -1208,6 +1236,7 @@ class IRCBot:
         geocode_url = (
             "https://nominatim.openstreetmap.org/search?"
             f"postalcode={quote(postal_code)}&countrycodes=de&format=jsonv2&limit=5&addressdetails=1"
+            f"&accept-language={quote(self.config.language)}"
         )
         geocode_data = self.fetch_json(geocode_url)
         if not geocode_data:
@@ -1222,9 +1251,9 @@ class IRCBot:
             for result in results:
                 display_name = str(result.get("display_name", ""))
                 if suffix.lower() in display_name.lower():
-                    return result
+                    return self.normalize_nominatim_location(result)
 
-        return results[0]
+        return self.normalize_nominatim_location(results[0])
 
     @staticmethod
     def safe_float(value: object) -> float | None:
@@ -1236,7 +1265,7 @@ class IRCBot:
     def geocode_location_name(self, location: str) -> dict[str, object] | None:
         geocode_url = (
             "https://geocoding-api.open-meteo.com/v1/search?name="
-            f"{quote(location)}&count=5&language=de&format=json"
+            f"{quote(location)}&count=5&language={quote(self.config.language)}&format=json"
         )
 
         geocode_data = self.fetch_json(geocode_url)
@@ -1248,6 +1277,34 @@ class IRCBot:
             return None
 
         return results[0]
+
+    def normalize_nominatim_location(self, result: dict[str, object]) -> dict[str, object] | None:
+        address = result.get("address")
+        address_dict = address if isinstance(address, dict) else {}
+        latitude = self.safe_float(result.get("lat"))
+        longitude = self.safe_float(result.get("lon"))
+        if latitude is None or longitude is None:
+            return None
+
+        name_candidates = (
+            address_dict.get("city"),
+            address_dict.get("town"),
+            address_dict.get("village"),
+            address_dict.get("municipality"),
+            address_dict.get("hamlet"),
+            result.get("name"),
+            str(result.get("display_name", "")).split(",", 1)[0],
+            result.get("display_name"),
+        )
+        place_name = next((str(candidate).strip() for candidate in name_candidates if candidate), "")
+
+        return {
+            "name": place_name,
+            "admin1": str(address_dict.get("state", "")).strip(),
+            "country": str(address_dict.get("country", "")).strip(),
+            "latitude": latitude,
+            "longitude": longitude,
+        }
 
     def extract_postal_code(self, location: str) -> str | None:
         match = re.search(r"\b(\d{5})\b", location)
@@ -1273,12 +1330,18 @@ class IRCBot:
     ) -> str:
         bold = "\x02"
         reset = "\x0f"
-        temp_text = f"\x0303{temperature}°C{reset}" if temperature is not None else "n/a"
-        feel_text = f"{feels_like}°C" if feels_like is not None else "n/a"
-        humidity_text = f"{humidity}%" if humidity is not None else "n/a"
-        precipitation_text = f"{precipitation} mm" if precipitation is not None else "n/a"
-        wind_text = f"{wind_speed} km/h" if wind_speed is not None else "n/a"
-        direction_text = f"{wind_direction}°" if wind_direction is not None else "n/a"
+        temp_value = self.format_localized_number(temperature)
+        feel_value = self.format_localized_number(feels_like)
+        humidity_value = self.format_localized_number(humidity)
+        precipitation_value = self.format_localized_number(precipitation)
+        wind_value = self.format_localized_number(wind_speed)
+        direction_value = self.format_localized_number(wind_direction)
+        temp_text = f"\x0303{temp_value}°C{reset}" if temperature is not None else "n/a"
+        feel_text = f"{feel_value}°C" if feels_like is not None else "n/a"
+        humidity_text = f"{humidity_value}%" if humidity is not None else "n/a"
+        precipitation_text = f"{precipitation_value} mm" if precipitation is not None else "n/a"
+        wind_text = f"{wind_value} km/h" if wind_speed is not None else "n/a"
+        direction_text = f"{direction_value}°" if wind_direction is not None else "n/a"
 
         return (
             f"{bold}{self.tr('weather_cc', location=display_place)}{reset}: {temp_text}, {condition}, "
@@ -1531,11 +1594,12 @@ class IRCBot:
     def get_dart_stats_text(self, target_nick: str, requested_by: str) -> str:
         points, hit_text = self.roll_dart_turn()
         self.record_dart_throw(requested_by, points)
+        rendered_target = self.format_target_nick(target_nick)
         if points == 31337:
             return self.tr(
                 "dart_destroy",
                 bot=self.current_nick,
-                target=target_nick,
+                target=rendered_target,
                 points=self.format_points(points),
                 hit=hit_text,
                 requested_by=requested_by,
@@ -1544,7 +1608,7 @@ class IRCBot:
         return self.tr(
             "dart_hit",
             bot=self.current_nick,
-            target=target_nick,
+            target=rendered_target,
             hit=hit_text,
             points=self.format_points(points),
             requested_by=requested_by,
