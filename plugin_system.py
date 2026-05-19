@@ -12,10 +12,14 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class MessageContext:
     source_nick: str
+    source_ident: str
+    source_host: str
+    source_mask: str
     target: str
     message: str
     reply_target: str
     command_prefix: str
+    is_private_message: bool
 
 
 CommandHandler = Callable[["IRCBot", MessageContext, str], None]

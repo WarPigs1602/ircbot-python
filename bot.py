@@ -2,6 +2,9 @@ import json
 import base64
 import argparse
 import atexit
+import getpass
+import hashlib
+import hmac
 import os
 import random
 import re
@@ -118,6 +121,21 @@ DANGEROUS_CONTENT_TYPES = frozenset({
     "application/x-ms-xbap",
     "application/vnd.ms-htmlhelp",
 })
+
+DEFAULT_PREFIX_MODES = {
+    "q": "~",
+    "a": "&",
+    "o": "@",
+    "h": "%",
+    "v": "+",
+}
+ADMIN_SESSION_TTL_SECONDS = 1800
+ROLE_FLAG_COLUMNS = {
+    "admin": "is_admin",
+    "raw": "can_raw",
+}
+INVALID_HOSTMASK_MESSAGE = "Ungültige Hostmask."
+ROLE_EXISTS_QUERY = "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1"
 
 
 @dataclass
@@ -291,6 +309,9 @@ class IRCBot:
         self.last_nick_reclaim_attempt_at: float = 0.0
         self.nickserv_identify_sent = False
         self.startup_actions_completed = False
+        self.server_prefix_modes: dict[str, str] = dict(DEFAULT_PREFIX_MODES)
+        self._admin_sessions: dict[str, dict[str, object]] = {}
+        self._admin_bootstrap_warned = False
         self._send_lock = threading.RLock()
         self._url_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="urlsniff")
         self.plugin_manager = PluginManager(self, Path(__file__).resolve().parent / "plugins")
@@ -303,10 +324,14 @@ class IRCBot:
                 "sasl_failed": "SASL-Authentifizierung fehlgeschlagen.",
                 "nick_taken": "Nickname {old_nick} ist belegt, verwende {new_nick}",
                 "channel_not_joinable": "Channel nicht joinbar, entferne aus Liste: {channel}",
-                "db_setup_skip": "Hinweis: Konnte MySQL-Server nicht erreichen, DB-Setup wird uebersprungen.",
+                "db_setup_skip": "Hinweis: Konnte MySQL-Server nicht erreichen, DB-Setup wird übersprungen.",
                 "db_create_failed": "Hinweis: DB-Erstellung fehlgeschlagen: {error}",
                 "db_connect_failed": "Hinweis: Konnte keine Verbindung zur Bot-Datenbank herstellen.",
                 "db_table_setup_failed": "Hinweis: Tabellen-Setup fehlgeschlagen: {error}",
+                "admin_bootstrap_missing": "Kein Admin für Netzwerk {network} konfiguriert. Starte den Bot einmal im Vordergrund und lege einen Admin an.",
+                "admin_bootstrap_prompt": "Erststart für {network}: initialen Admin anlegen.",
+                "admin_bootstrap_created": "Initialer Admin {mask} wurde für Netzwerk {network} angelegt.",
+                "admin_bootstrap_skipped": "Admin-Bootstrap übersprungen. Ohne Admin sind keine Verwaltungsbefehle verfügbar.",
                 "config_missing": "config.json fehlt. Kopiere config.example.json zu config.json und passe die Werte an.",
                 "connecting": "Verbinde zu {server}:{port} (TLS={tls}) ...",
                 "connection_closed": "Verbindung beendet.",
@@ -323,6 +348,10 @@ class IRCBot:
                 "db_create_failed": "Notice: DB creation failed: {error}",
                 "db_connect_failed": "Notice: Could not connect to bot database.",
                 "db_table_setup_failed": "Notice: Table setup failed: {error}",
+                "admin_bootstrap_missing": "No admin is configured for network {network}. Start the bot once in the foreground and create an admin.",
+                "admin_bootstrap_prompt": "First run for {network}: create the initial admin.",
+                "admin_bootstrap_created": "Initial admin {mask} was created for network {network}.",
+                "admin_bootstrap_skipped": "Admin bootstrap skipped. No administrative commands will be available until an admin is created.",
                 "config_missing": "config.json is missing. Copy config.example.json to config.json and adjust values.",
                 "connecting": "Connecting to {server}:{port} (TLS={tls}) ...",
                 "connection_closed": "Connection closed.",
@@ -477,6 +506,90 @@ class IRCBot:
             self.send_raw(f"MODE {normalized_channel}")
 
     @staticmethod
+    def parse_prefix_token(value: str) -> dict[str, str] | None:
+        token = value[7:] if value.upper().startswith("PREFIX=") else value
+        if not token.startswith("(") or ")" not in token:
+            return None
+
+        modes_part, prefixes_part = token[1:].split(")", 1)
+        if not modes_part or not prefixes_part or len(modes_part) != len(prefixes_part):
+            return None
+
+        return dict(zip(modes_part, prefixes_part))
+
+    def handle_isupport_message(self, params: list[str]) -> None:
+        if len(params) < 2:
+            return
+
+        for token in params[1:]:
+            if token.startswith(":"):
+                break
+            parsed = self.parse_prefix_token(token)
+            if parsed is not None:
+                self.server_prefix_modes = parsed
+                break
+
+    @staticmethod
+    def split_hostmask(prefix: str) -> tuple[str, str, str]:
+        nick = prefix
+        ident = ""
+        host = ""
+
+        if "!" in prefix:
+            nick, remainder = prefix.split("!", 1)
+            if "@" in remainder:
+                ident, host = remainder.split("@", 1)
+            else:
+                ident = remainder
+        elif "@" in prefix:
+            ident, host = prefix.split("@", 1)
+
+        return nick, ident, host
+
+    @staticmethod
+    def normalize_user_mask(mask: str) -> str | None:
+        raw = mask.strip()
+        if raw.count("@") != 1:
+            return None
+
+        ident, host = raw.split("@", 1)
+        ident = ident.strip().lower()
+        host = host.strip().lower()
+        if not ident or not host:
+            return None
+        return f"{ident}@{host}"
+
+    @staticmethod
+    def normalize_role_name(role_name: str) -> str | None:
+        role = role_name.strip().lower()
+        if not role or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", role):
+            return None
+        return role
+
+    @staticmethod
+    def normalize_channel_name(channel: str) -> str:
+        return channel.strip().lower()
+
+    def user_mask_from_parts(self, ident: str, host: str) -> str | None:
+        if not ident or not host:
+            return None
+        return self.normalize_user_mask(f"{ident}@{host}")
+
+    def normalize_member_mode(self, mode_or_prefix: str) -> str | None:
+        token = mode_or_prefix.strip()
+        if len(token) != 1:
+            return None
+
+        if token in self.server_prefix_modes:
+            return token
+
+        for mode, prefix in self.server_prefix_modes.items():
+            if prefix == token:
+                return mode
+
+        return None
+
+    @staticmethod
     def parse_mode_snapshot(modes: str) -> set[str]:
         active: set[str] = set()
         for char in modes:
@@ -497,6 +610,16 @@ class IRCBot:
             else:
                 active.discard(char)
         self.channel_modes[channel] = active
+
+    def apply_member_mode(self, channel: str, nick: str, mode: str) -> None:
+        if not channel or not nick or not mode:
+            return
+        self.send_raw(f"MODE {channel} +{mode} {nick}")
+
+    def remove_member_mode(self, channel: str, nick: str, mode: str) -> None:
+        if not channel or not nick or not mode:
+            return
+        self.send_raw(f"MODE {channel} -{mode} {nick}")
 
     def remember_channel(self, channel: str) -> None:
         normalized_channel = channel.strip()
@@ -738,6 +861,10 @@ class IRCBot:
                 self.handle_cap_message(params)
                 continue
 
+            if command == "005":
+                self.handle_isupport_message(params)
+                continue
+
             if command == "PONG":
                 self.handle_pong_message(params)
                 continue
@@ -766,14 +893,17 @@ class IRCBot:
                     self.current_nick = new_nick
                     if new_nick.lower() == self.preferred_nick.lower():
                         self.last_nick_reclaim_attempt_at = 0.0
+                self.update_admin_session_nick(changed_nick, new_nick)
                 continue
 
             if command == "JOIN" and len(params) >= 1:
                 joined_channel = params[0].lstrip(":")
-                joined_nick = prefix.split("!", 1)[0] if prefix else ""
+                joined_nick, joined_ident, joined_host = self.split_hostmask(prefix)
                 if joined_nick.lower() == self.current_nick.lower() and joined_channel:
                     self.remember_channel(joined_channel)
                     self.request_channel_modes(joined_channel)
+                elif joined_channel:
+                    self.apply_configured_channel_modes(joined_channel, joined_nick, joined_ident, joined_host)
                 continue
 
             if command == "PART" and len(params) >= 1:
@@ -838,18 +968,24 @@ class IRCBot:
             if command == "PRIVMSG" and len(params) >= 2:
                 target = params[0]
                 message = params[1]
-                source_nick = prefix.split("!", 1)[0] if prefix else ""
-                self.handle_privmsg(source_nick, target, message)
+                source_nick, source_ident, source_host = self.split_hostmask(prefix)
+                self.handle_privmsg(source_nick, source_ident, source_host, target, message)
 
-    def handle_privmsg(self, source_nick: str, target: str, message: str) -> None:
+    def handle_privmsg(self, source_nick: str, source_ident: str, source_host: str, target: str, message: str) -> None:
         prefix = self.config.command_prefix
-        reply_target = source_nick if target.lower() == self.current_nick.lower() else target
+        is_private_message = target.lower() == self.current_nick.lower()
+        reply_target = source_nick if is_private_message else target
+        source_mask = self.user_mask_from_parts(source_ident, source_host) or ""
         context = MessageContext(
             source_nick=source_nick,
+            source_ident=source_ident,
+            source_host=source_host,
+            source_mask=source_mask,
             target=target,
             message=message,
             reply_target=reply_target,
             command_prefix=prefix,
+            is_private_message=is_private_message,
         )
         self.plugin_manager.handle_privmsg(context)
 
@@ -2022,6 +2158,58 @@ class IRCBot:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_admin_roles (
+                        network VARCHAR(255) NOT NULL,
+                        role_name VARCHAR(64) NOT NULL,
+                        is_admin TINYINT(1) NOT NULL DEFAULT 0,
+                        can_raw TINYINT(1) NOT NULL DEFAULT 0,
+                        created_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (network, role_name)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_admin_users (
+                        network VARCHAR(255) NOT NULL,
+                        user_mask VARCHAR(255) NOT NULL,
+                        display_name VARCHAR(64) NOT NULL DEFAULT '',
+                        password_salt VARCHAR(64) NOT NULL,
+                        password_hash VARCHAR(128) NOT NULL,
+                        role_name VARCHAR(64) NOT NULL,
+                        created_at VARCHAR(32) NOT NULL,
+                        created_by VARCHAR(64) NOT NULL DEFAULT '',
+                        PRIMARY KEY (network, user_mask),
+                        KEY idx_bot_admin_users_role (network, role_name)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_admin_role_modes (
+                        network VARCHAR(255) NOT NULL,
+                        role_name VARCHAR(64) NOT NULL,
+                        channel VARCHAR(128) NOT NULL,
+                        mode CHAR(1) NOT NULL,
+                        created_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (network, role_name, channel, mode)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_admin_user_modes (
+                        network VARCHAR(255) NOT NULL,
+                        user_mask VARCHAR(255) NOT NULL,
+                        channel VARCHAR(128) NOT NULL,
+                        mode CHAR(1) NOT NULL,
+                        created_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (network, user_mask, channel, mode)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
             self.db_initialized = True
         except Exception as exc:
             print(self.tr("db_table_setup_failed", error=exc))
@@ -2087,6 +2275,697 @@ class IRCBot:
             pass
         finally:
             conn.close()
+
+    @staticmethod
+    def hash_admin_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
+        salt = os.urandom(16).hex() if salt_hex is None else salt_hex
+        derived = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt),
+            200000,
+        ).hex()
+        return salt, derived
+
+    def verify_admin_password(self, password: str, salt_hex: str, expected_hash: str) -> bool:
+        _, derived = self.hash_admin_password(password, salt_hex)
+        return hmac.compare_digest(derived, expected_hash)
+
+    def has_admin_users(self) -> bool:
+        conn = self.open_db_connection()
+        if conn is None:
+            return False
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_users WHERE network = %s LIMIT 1",
+                    (self.config.network_key,),
+                )
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+    def ensure_admin_bootstrap(self, interactive: bool) -> None:
+        if not self.db_initialized or self.has_admin_users():
+            return
+
+        if not interactive:
+            if not self._admin_bootstrap_warned:
+                print(self.tr("admin_bootstrap_missing", network=self.config.network_key))
+                self._admin_bootstrap_warned = True
+            return
+
+        print(self.tr("admin_bootstrap_prompt", network=self.config.network_key))
+
+        admin_mask = ""
+        while not admin_mask:
+            entered_mask = input("Admin ident@host: ").strip()
+            normalized_mask = self.normalize_user_mask(entered_mask)
+            if normalized_mask is None:
+                print("Ungültige Hostmask. Erwartet wird ident@host.")
+                continue
+            admin_mask = normalized_mask
+
+        password = ""
+        while not password:
+            first = getpass.getpass("Admin Passwort: ")
+            second = getpass.getpass("Passwort wiederholen: ")
+            if not first:
+                print("Passwort darf nicht leer sein.")
+                continue
+            if first != second:
+                print("Passwörter stimmen nicht überein.")
+                continue
+            password = first
+
+        self.ensure_default_admin_role()
+
+        created_user, user_message = self.create_admin_user(
+            display_name="bootstrap",
+            user_mask=admin_mask,
+            password=password,
+            role_name="admin",
+            created_by="bootstrap",
+        )
+        if not created_user:
+            print(user_message)
+            print(self.tr("admin_bootstrap_skipped"))
+            return
+
+        print(self.tr("admin_bootstrap_created", mask=admin_mask, network=self.config.network_key))
+
+    def ensure_default_admin_role(self) -> None:
+        conn = self.open_db_connection()
+        if conn is None:
+            return
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(ROLE_EXISTS_QUERY, (self.config.network_key, "admin"))
+                if cur.fetchone() is not None:
+                    cur.execute(
+                        "UPDATE bot_admin_roles SET is_admin = 1, can_raw = 1 WHERE network = %s AND role_name = %s",
+                        (self.config.network_key, "admin"),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
+                        VALUES (%s, %s, 1, 1, %s)
+                        """,
+                        (self.config.network_key, "admin", self.current_time_string()),
+                    )
+
+                cur.execute(ROLE_EXISTS_QUERY, (self.config.network_key, "user"))
+                if cur.fetchone() is None:
+                    cur.execute(
+                        """
+                        INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
+                        VALUES (%s, %s, 0, 0, %s)
+                        """,
+                        (self.config.network_key, "user", self.current_time_string()),
+                    )
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def load_admin_user(self, user_mask: str) -> dict[str, object] | None:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return None
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return None
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT u.user_mask, u.display_name, u.password_salt, u.password_hash, u.role_name,
+                           COALESCE(r.is_admin, 0) AS is_admin,
+                           COALESCE(r.can_raw, 0) AS can_raw
+                    FROM bot_admin_users u
+                    LEFT JOIN bot_admin_roles r
+                      ON r.network = u.network AND r.role_name = u.role_name
+                    WHERE u.network = %s AND u.user_mask = %s
+                    LIMIT 1
+                    """,
+                    (self.config.network_key, normalized_mask),
+                )
+                row = cur.fetchone()
+                return row if row else None
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+    def get_authenticated_admin(self, user_mask: str, require_admin: bool = False, require_raw: bool = False) -> dict[str, object] | None:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return None
+
+        session = self._admin_sessions.get(normalized_mask)
+        if session is None:
+            return None
+
+        expires_at = float(session.get("expires_at", 0.0))
+        if expires_at < time.time():
+            self.end_admin_session(normalized_mask, revoke_modes=True)
+            return None
+
+        row = self.load_admin_user(normalized_mask)
+        if row is None:
+            self.end_admin_session(normalized_mask, revoke_modes=True)
+            return None
+
+        if require_admin and not bool(int(row.get("is_admin", 0))):
+            return None
+        if require_raw and not bool(int(row.get("can_raw", 0))):
+            return None
+
+        session["expires_at"] = time.time() + ADMIN_SESSION_TTL_SECONDS
+        return row
+
+    def login_admin_user(self, user_mask: str, password: str, nick: str = "") -> tuple[bool, str]:
+        row = self.load_admin_user(user_mask)
+        if row is None:
+            return False, "Unbekannte Hostmask."
+
+        salt = str(row.get("password_salt", ""))
+        expected_hash = str(row.get("password_hash", ""))
+        if not salt or not expected_hash or not self.verify_admin_password(password, salt, expected_hash):
+            return False, "Passwort falsch."
+
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return False, INVALID_HOSTMASK_MESSAGE
+
+        self._admin_sessions[normalized_mask] = {
+            "expires_at": time.time() + ADMIN_SESSION_TTL_SECONDS,
+            "nick": nick.strip(),
+        }
+        applied_count = self.apply_login_modes_for_user(normalized_mask, nick.strip())
+        suffix = f" Höchste Channel-Rechte gesetzt: {applied_count}." if applied_count > 0 else ""
+        return True, f"Login erfolgreich für {normalized_mask}.{suffix}"
+
+    def logout_admin_user(self, user_mask: str) -> bool:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return False
+        return self.end_admin_session(normalized_mask, revoke_modes=True)
+
+    def end_admin_session(self, user_mask: str, revoke_modes: bool) -> bool:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return False
+
+        session = self._admin_sessions.pop(normalized_mask, None)
+        if session is None:
+            return False
+
+        if revoke_modes:
+            nick = str(session.get("nick", "")).strip()
+            self.revoke_login_modes_for_user(normalized_mask, nick)
+        return True
+
+    def update_admin_session_nick(self, previous_nick: str, new_nick: str) -> None:
+        old = previous_nick.strip().lower()
+        if not old or not new_nick:
+            return
+
+        for session in self._admin_sessions.values():
+            nick = str(session.get("nick", "")).strip()
+            if nick.lower() == old:
+                session["nick"] = new_nick
+
+    def create_admin_role(self, role_name: str, is_admin: bool = False, can_raw: bool = False) -> tuple[bool, str]:
+        normalized_role = self.normalize_role_name(role_name)
+        if normalized_role is None:
+            return False, "Ungültiger Rollenname. Erlaubt sind a-z, 0-9, _ und - ."
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, self.tr("db_connect_failed")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    ROLE_EXISTS_QUERY,
+                    (self.config.network_key, normalized_role),
+                )
+                if cur.fetchone() is not None:
+                    return False, f"Rolle {normalized_role} existiert bereits."
+
+                cur.execute(
+                    """
+                    INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (self.config.network_key, normalized_role, 1 if is_admin else 0, 1 if can_raw else 0, self.current_time_string()),
+                )
+            return True, f"Rolle {normalized_role} angelegt."
+        except Exception as exc:
+            return False, f"Rolle konnte nicht angelegt werden: {exc}"
+        finally:
+            conn.close()
+
+    def set_role_flag(self, role_name: str, flag_name: str, enabled: bool) -> tuple[bool, str]:
+        normalized_role = self.normalize_role_name(role_name)
+        column = ROLE_FLAG_COLUMNS.get(flag_name.strip().lower())
+        if normalized_role is None or column is None:
+            return False, "Ungültige Rolle oder Flag. Erlaubte Flags: admin, raw."
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, self.tr("db_connect_failed")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE bot_admin_roles SET {column} = %s WHERE network = %s AND role_name = %s",
+                    (1 if enabled else 0, self.config.network_key, normalized_role),
+                )
+                if cur.rowcount == 0:
+                    return False, f"Rolle {normalized_role} existiert nicht."
+            return True, f"Flag {flag_name.lower()} fuer Rolle {normalized_role} ist jetzt {'an' if enabled else 'aus'}."
+        except Exception as exc:
+            return False, f"Rollenflag konnte nicht gesetzt werden: {exc}"
+        finally:
+            conn.close()
+
+    def list_admin_roles(self) -> list[dict[str, object]]:
+        conn = self.open_db_connection()
+        if conn is None:
+            return []
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role_name, is_admin, can_raw
+                    FROM bot_admin_roles
+                    WHERE network = %s
+                    ORDER BY role_name ASC
+                    """,
+                    (self.config.network_key,),
+                )
+                return list(cur.fetchall() or [])
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    def create_admin_user(self, display_name: str, user_mask: str, password: str, role_name: str, created_by: str) -> tuple[bool, str]:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        normalized_role = self.normalize_role_name(role_name)
+        label = display_name.strip()[:64]
+
+        if normalized_mask is None:
+            return False, "Ungültige Hostmask. Erwartet wird ident@host."
+        if normalized_role is None:
+            return False, "Ungültiger Rollenname."
+        if not password:
+            return False, "Passwort darf nicht leer sein."
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, self.tr("db_connect_failed")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1",
+                    (self.config.network_key, normalized_role),
+                )
+                if cur.fetchone() is None:
+                    return False, f"Rolle {normalized_role} existiert nicht."
+
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
+                    (self.config.network_key, normalized_mask),
+                )
+                if cur.fetchone() is not None:
+                    return False, f"Benutzer {normalized_mask} existiert bereits."
+
+                salt_hex, hash_hex = self.hash_admin_password(password)
+                cur.execute(
+                    """
+                    INSERT INTO bot_admin_users
+                        (network, user_mask, display_name, password_salt, password_hash, role_name, created_at, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        self.config.network_key,
+                        normalized_mask,
+                        label,
+                        salt_hex,
+                        hash_hex,
+                        normalized_role,
+                        self.current_time_string(),
+                        created_by[:64],
+                    ),
+                )
+            return True, f"Benutzer {normalized_mask} mit Rolle {normalized_role} angelegt."
+        except Exception as exc:
+            return False, f"Benutzer konnte nicht angelegt werden: {exc}"
+        finally:
+            conn.close()
+
+    def delete_admin_user(self, user_mask: str) -> tuple[bool, str]:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return False, INVALID_HOSTMASK_MESSAGE
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, self.tr("db_connect_failed")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s",
+                    (self.config.network_key, normalized_mask),
+                )
+                cur.execute(
+                    "DELETE FROM bot_admin_users WHERE network = %s AND user_mask = %s",
+                    (self.config.network_key, normalized_mask),
+                )
+                if cur.rowcount == 0:
+                    return False, f"Benutzer {normalized_mask} existiert nicht."
+            self._admin_sessions.pop(normalized_mask, None)
+            return True, f"Benutzer {normalized_mask} geloescht."
+        except Exception as exc:
+            return False, f"Benutzer konnte nicht geloescht werden: {exc}"
+        finally:
+            conn.close()
+
+    def set_admin_user_role(self, user_mask: str, role_name: str) -> tuple[bool, str]:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        normalized_role = self.normalize_role_name(role_name)
+        if normalized_mask is None or normalized_role is None:
+            return False, "Ungültige Hostmask oder Rolle."
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, self.tr("db_connect_failed")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    ROLE_EXISTS_QUERY,
+                    (self.config.network_key, normalized_role),
+                )
+                if cur.fetchone() is None:
+                    return False, f"Rolle {normalized_role} existiert nicht."
+
+                cur.execute(
+                    "UPDATE bot_admin_users SET role_name = %s WHERE network = %s AND user_mask = %s",
+                    (normalized_role, self.config.network_key, normalized_mask),
+                )
+                if cur.rowcount == 0:
+                    return False, f"Benutzer {normalized_mask} existiert nicht."
+            return True, f"Benutzer {normalized_mask} hat jetzt Rolle {normalized_role}."
+        except Exception as exc:
+            return False, f"Rolle konnte nicht gesetzt werden: {exc}"
+        finally:
+            conn.close()
+
+    def list_admin_users(self) -> list[dict[str, object]]:
+        conn = self.open_db_connection()
+        if conn is None:
+            return []
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_mask, display_name, role_name
+                    FROM bot_admin_users
+                    WHERE network = %s
+                    ORDER BY user_mask ASC
+                    """,
+                    (self.config.network_key,),
+                )
+                return list(cur.fetchall() or [])
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    def set_role_channel_mode(self, role_name: str, channel: str, mode_or_prefix: str, enabled: bool) -> tuple[bool, str]:
+        normalized_role = self.normalize_role_name(role_name)
+        normalized_channel = self.normalize_channel_name(channel)
+        mode = self.normalize_member_mode(mode_or_prefix)
+        if normalized_role is None or not normalized_channel.startswith("#") or mode is None:
+            return False, "Ungültige Rolle, Channel oder Modus."
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, self.tr("db_connect_failed")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    ROLE_EXISTS_QUERY,
+                    (self.config.network_key, normalized_role),
+                )
+                if cur.fetchone() is None:
+                    return False, f"Rolle {normalized_role} existiert nicht."
+
+                if enabled:
+                    cur.execute(
+                        """
+                        INSERT IGNORE INTO bot_admin_role_modes (network, role_name, channel, mode, created_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (self.config.network_key, normalized_role, normalized_channel, mode, self.current_time_string()),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM bot_admin_role_modes WHERE network = %s AND role_name = %s AND channel = %s AND mode = %s",
+                        (self.config.network_key, normalized_role, normalized_channel, mode),
+                    )
+            action = "gesetzt" if enabled else "entfernt"
+            return True, f"Rollenrecht {normalized_role} {normalized_channel} +{mode} {action}."
+        except Exception as exc:
+            return False, f"Rollenrecht konnte nicht gespeichert werden: {exc}"
+        finally:
+            conn.close()
+
+    def set_user_channel_mode(self, user_mask: str, channel: str, mode_or_prefix: str, enabled: bool) -> tuple[bool, str]:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        normalized_channel = self.normalize_channel_name(channel)
+        mode = self.normalize_member_mode(mode_or_prefix)
+        if normalized_mask is None or not normalized_channel.startswith("#") or mode is None:
+            return False, "Ungültige Hostmask, Channel oder Modus."
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, self.tr("db_connect_failed")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
+                    (self.config.network_key, normalized_mask),
+                )
+                if cur.fetchone() is None:
+                    return False, f"Benutzer {normalized_mask} existiert nicht."
+
+                if enabled:
+                    cur.execute(
+                        """
+                        INSERT IGNORE INTO bot_admin_user_modes (network, user_mask, channel, mode, created_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (self.config.network_key, normalized_mask, normalized_channel, mode, self.current_time_string()),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s AND channel = %s AND mode = %s",
+                        (self.config.network_key, normalized_mask, normalized_channel, mode),
+                    )
+            action = "gesetzt" if enabled else "entfernt"
+            return True, f"Benutzerrecht {normalized_mask} {normalized_channel} +{mode} {action}."
+        except Exception as exc:
+            return False, f"Benutzerrecht konnte nicht gespeichert werden: {exc}"
+        finally:
+            conn.close()
+
+    def get_configured_user_channel_modes(self, user_mask: str, channel: str) -> tuple[str, ...]:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        normalized_channel = self.normalize_channel_name(channel)
+        if normalized_mask is None or not normalized_channel:
+            return ()
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return ()
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT role_name FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
+                    (self.config.network_key, normalized_mask),
+                )
+                row = cur.fetchone() or {}
+                role_name = self.normalize_role_name(str(row.get("role_name", "")))
+
+                modes: set[str] = set()
+                if role_name:
+                    cur.execute(
+                        "SELECT mode FROM bot_admin_role_modes WHERE network = %s AND role_name = %s AND channel = %s",
+                        (self.config.network_key, role_name, normalized_channel),
+                    )
+                    modes.update(
+                        mode
+                        for mode in (self.normalize_member_mode(str(entry.get("mode", ""))) for entry in (cur.fetchall() or []))
+                        if mode is not None
+                    )
+
+                cur.execute(
+                    "SELECT mode FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s AND channel = %s",
+                    (self.config.network_key, normalized_mask, normalized_channel),
+                )
+                modes.update(
+                    mode
+                    for mode in (self.normalize_member_mode(str(entry.get("mode", ""))) for entry in (cur.fetchall() or []))
+                    if mode is not None
+                )
+        except Exception:
+            return ()
+        finally:
+            conn.close()
+
+        ordered = [mode for mode in self.server_prefix_modes if mode in modes]
+        return tuple(ordered)
+
+    def is_admin_session_active(self, user_mask: str) -> bool:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return False
+
+        session = self._admin_sessions.get(normalized_mask)
+        if session is None:
+            return False
+
+        expires_at = float(session.get("expires_at", 0.0))
+        if expires_at < time.time():
+            self.end_admin_session(normalized_mask, revoke_modes=True)
+            return False
+        return True
+
+    def get_user_channel_modes(self, user_mask: str, channel: str) -> tuple[str, ...]:
+        if not self.is_admin_session_active(user_mask):
+            return ()
+
+        configured_modes = self.get_configured_user_channel_modes(user_mask, channel)
+        return configured_modes[:1]
+
+    def get_user_assigned_channels(self, user_mask: str) -> tuple[str, ...]:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return ()
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return ()
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT role_name FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
+                    (self.config.network_key, normalized_mask),
+                )
+                row = cur.fetchone() or {}
+                role_name = self.normalize_role_name(str(row.get("role_name", "")))
+
+                channels: set[str] = set()
+                if role_name:
+                    cur.execute(
+                        "SELECT channel FROM bot_admin_role_modes WHERE network = %s AND role_name = %s",
+                        (self.config.network_key, role_name),
+                    )
+                    channels.update(
+                        self.normalize_channel_name(str(entry.get("channel", "")))
+                        for entry in (cur.fetchall() or [])
+                        if str(entry.get("channel", "")).strip()
+                    )
+
+                cur.execute(
+                    "SELECT channel FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s",
+                    (self.config.network_key, normalized_mask),
+                )
+                channels.update(
+                    self.normalize_channel_name(str(entry.get("channel", "")))
+                    for entry in (cur.fetchall() or [])
+                    if str(entry.get("channel", "")).strip()
+                )
+        except Exception:
+            return ()
+        finally:
+            conn.close()
+
+        return tuple(sorted(channel for channel in channels if channel.startswith("#")))
+
+    def apply_login_modes_for_user(self, user_mask: str, nick: str) -> int:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        target_nick = nick.strip()
+        if normalized_mask is None or not target_nick:
+            return 0
+
+        applied = 0
+        for channel in self.get_user_assigned_channels(normalized_mask):
+            modes = self.get_user_channel_modes(normalized_mask, channel)
+            if not modes:
+                continue
+            self.apply_member_mode(channel, target_nick, modes[0])
+            applied += 1
+        return applied
+
+    def revoke_login_modes_for_user(self, user_mask: str, nick: str) -> int:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        target_nick = nick.strip()
+        if normalized_mask is None or not target_nick:
+            return 0
+
+        revoked = 0
+        for channel in self.get_user_assigned_channels(normalized_mask):
+            modes = self.get_configured_user_channel_modes(normalized_mask, channel)
+            if not modes:
+                continue
+            self.remove_member_mode(channel, target_nick, modes[0])
+            revoked += 1
+        return revoked
+
+    def apply_configured_channel_modes(self, channel: str, nick: str, ident: str, host: str) -> tuple[str, ...]:
+        user_mask = self.user_mask_from_parts(ident, host)
+        if user_mask is None:
+            return ()
+
+        modes = self.get_user_channel_modes(user_mask, channel)
+        for mode in modes:
+            self.apply_member_mode(channel, nick, mode)
+        return modes
+
+    def apply_channel_modes_for_mask(self, channel: str, nick: str, user_mask: str) -> tuple[bool, str]:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        if normalized_mask is None:
+            return False, INVALID_HOSTMASK_MESSAGE
+
+        modes = self.get_user_channel_modes(normalized_mask, channel)
+        if not modes:
+            return False, f"Keine Rechte fuer {normalized_mask} in {channel} konfiguriert."
+
+        for mode in modes:
+            self.apply_member_mode(channel, nick, mode)
+        rendered_modes = ", ".join(f"+{mode}" for mode in modes)
+        return True, f"Modi {rendered_modes} fuer {nick} in {channel} gesendet."
 
     @staticmethod
     def current_time_string() -> str:
@@ -2275,6 +3154,16 @@ def start_background_process(pid_file: Path) -> bool:
     return True
 
 
+def ensure_admin_bootstrap_for_configs(configs: list[BotConfig], interactive: bool) -> None:
+    for config in configs:
+        bot = IRCBot(config)
+        try:
+            bot.ensure_database_setup()
+            bot.ensure_admin_bootstrap(interactive)
+        finally:
+            bot.close()
+
+
 def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None) -> None:
     base_retry_wait = max(30, config.reconnect_delay_seconds)
     retry_wait = base_retry_wait
@@ -2282,6 +3171,8 @@ def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None
     while not (stop_event and stop_event.is_set()):
         bot = IRCBot(config)
         bot.setup_oidentd_conf()
+        bot.ensure_database_setup()
+        bot.ensure_admin_bootstrap(sys.stdin.isatty())
         connected_at = time.monotonic()
         try:
             print(f"[{config.display_name()}] " + bot.tr("connecting", server=config.server, port=config.port, tls=config.use_tls))
@@ -2363,10 +3254,30 @@ def main() -> None:
 
     if args.restart:
         stop_from_pid_file(pid_file)
+        config_path = Path("config.json")
+        if not config_path.exists():
+            raise SystemExit(
+                "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
+            )
+        try:
+            configs = BotConfig.load_from_file(config_path)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        ensure_admin_bootstrap_for_configs(configs, sys.stdin.isatty())
         start_background_process(pid_file)
         return
 
     if args.start:
+        config_path = Path("config.json")
+        if not config_path.exists():
+            raise SystemExit(
+                "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
+            )
+        try:
+            configs = BotConfig.load_from_file(config_path)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        ensure_admin_bootstrap_for_configs(configs, sys.stdin.isatty())
         start_background_process(pid_file)
         return
 
