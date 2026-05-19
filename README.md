@@ -6,7 +6,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
 - TLS connection support (`use_tls`, enabled by default)
 - Multi-network support via required `networks` array (one bot connection per entry)
 - Built-in plugin system with one plugin per command/trigger under `plugins/`
-- Administrative PM commands with hostmask + password authentication
+- Administrative PM commands without prefix, protected by hostmask + password authentication
 - Per-network plugin activation via `enabled_plugins` / `disabled_plugins`
 - Per-network `enabled` flag and reconnect delay (`reconnect_delay_seconds`)
 - Automatic reconnect loop on network errors
@@ -18,7 +18,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
 - Optional SASL PLAIN authentication (`CAP` negotiation)
 - Optional NickServ identify command and nickname reclaiming
 - Optional `perform` commands after successful connect (for example: user mode)
-- Role-based channel rights (`+q +a +o +h +v`) according to server-advertised `PREFIX` support
+- Role-based channel rights (`+q +a +o +h +v`) according to server-advertised `PREFIX` support, applied on login with the highest configured level
 - Optional admin raw command forwarding via PM trigger
 - URL sniffing in channel messages:
   - Detects posted `http/https` links
@@ -135,8 +135,6 @@ Default prefix: `!`
 The following commands are available when the corresponding plugins are enabled:
 
 - `!help` / `!hilfe`
-- `!admin ...` (per PM only)
-- `!raw <irc-raw>` (per PM only, admin role with `raw=on`)
 - `!ping [nick]`
 - `!pong [nick]`
 - `!lag`
@@ -152,9 +150,11 @@ The following commands are available when the corresponding plugins are enabled:
 
 Notes:
 - `!help`, `!echo`, and `!mydartstats` are sent as NOTICE to the requesting user.
-- On the first foreground start with a configured database but no admin user, the bot asks in the terminal for an initial `ident@host` and password.
-- Administrative commands only work in a private message to the bot and require `!admin login <password>` from the matching `ident@host` first.
-- New users default to the non-admin `user` role; channel rights can be assigned per role or per user and are applied automatically when the matching user joins a channel.
+- If no admin user exists yet, the bot asks in the terminal for an initial `ident@host` and password before a foreground run and also before `--start` / `--restart`.
+- Administrative commands only work in a private message to the bot and must be sent without the normal command prefix.
+- Admin rights require `login <password>` from the matching `ident@host` first.
+- New users default to the non-admin `user` role; channel rights can be assigned per role or per user and are only applied while the matching user is logged in.
+- If multiple rights are configured for the same channel, the bot only applies the highest supported mode.
 - Supported member modes are limited to what the IRC server advertises via `005 PREFIX=...`.
 - If `!dart` has no argument, the caller nickname is used.
 - `!lag` measures latency in nanoseconds and displays a readable millisecond value (for sub-millisecond latency as decimal, e.g. `0.123 ms`) plus raw `ns` in parentheses.
@@ -165,33 +165,37 @@ Trigger plugins:
 - `urlsniffer`: scans posted URLs and stores/sniffs them automatically
 
 ## Admin PM Commands
-Default prefix: `!`
+Send these as a private message to the bot, without the normal command prefix:
 
-Send these as a private message to the bot:
-
-- `!admin help`
-- `!admin login <password>`
-- `!admin logout`
-- `!admin whoami`
-- `!admin listroles`
-- `!admin listusers`
-- `!admin roleadd <role> [admin=on] [raw=on]`
-- `!admin roleflag <role> <admin|raw> <on|off>`
-- `!admin adduser <name> <ident@host> <password> [role]`
-- `!admin deluser <ident@host>`
-- `!admin setrole <ident@host> <role>`
-- `!admin rolemode <role> <#channel> <mode>`
-- `!admin rolemode-del <role> <#channel> <mode>`
-- `!admin usermode <ident@host> <#channel> <mode>`
-- `!admin usermode-del <ident@host> <#channel> <mode>`
-- `!admin apply <nick> <#channel> <ident@host>`
-- `!raw <IRC RAW LINE>`
+- `help`
+- `help auth`
+- `help users`
+- `help roles`
+- `help modes`
+- `help raw`
+- `login <password>`
+- `logout`
+- `whoami`
+- `listroles`
+- `listusers`
+- `roleadd <role> [admin=on] [raw=on]`
+- `roleflag <role> <admin|raw> <on|off>`
+- `adduser <name> <ident@host> <password> [role]`
+- `deluser <ident@host>`
+- `setrole <ident@host> <role>`
+- `rolemode <role> <#channel> <mode>`
+- `rolemode-del <role> <#channel> <mode>`
+- `usermode <ident@host> <#channel> <mode>`
+- `usermode-del <ident@host> <#channel> <mode>`
+- `apply <nick> <#channel> <ident@host>`
+- `raw <IRC RAW LINE>`
 
 Examples:
-- `!admin roleadd ops`
-- `!admin rolemode ops #mychan o`
-- `!admin adduser alice ident@example.org geheim ops`
-- `!admin apply Alice #mychan ident@example.org`
+- `login geheim`
+- `roleadd ops`
+- `rolemode ops #mychan o`
+- `adduser alice ident@example.org geheim ops`
+- `apply Alice #mychan ident@example.org`
 
 ## URL and YouTube Behavior
 - Posted URLs are normalized and processed once per runtime session.
