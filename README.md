@@ -1,10 +1,12 @@
 # Python IRC Bot
 
-A Python IRC bot with reconnect logic, command handling, URL sniffing, weather lookup, and optional YouTube metadata.
+A Python IRC bot with reconnect logic, a plugin-based command and trigger system, URL sniffing, weather lookup, and optional YouTube metadata.
 
 ## Features
 - TLS connection support (`use_tls`, enabled by default)
 - Multi-network support via required `networks` array (one bot connection per entry)
+- Built-in plugin system with one plugin per command/trigger under `plugins/`
+- Per-network plugin activation via `enabled_plugins` / `disabled_plugins`
 - Per-network `enabled` flag and reconnect delay (`reconnect_delay_seconds`)
 - Automatic reconnect loop on network errors
 - Responds to server `PING` with `PONG`
@@ -25,6 +27,27 @@ A Python IRC bot with reconnect logic, command handling, URL sniffing, weather l
 - Optional YouTube link parsing via YouTube Data API
 - German/English output (`language: "de"` or `"en"`)
 
+## Plugin System
+- Built-in plugins live in `plugins/<name>/plugin.py`.
+- Commands and triggers are loaded dynamically on bot startup.
+- If `enabled_plugins` is empty or omitted, all built-in plugins are loaded except those listed in `disabled_plugins`.
+- If `enabled_plugins` contains entries, only these plugins are loaded for that network.
+- Plugin names currently available:
+  - `help`
+  - `ping`
+  - `pong`
+  - `lag`
+  - `echo`
+  - `slap`
+  - `dart`
+  - `darttop10`
+  - `mydartstats`
+  - `weather`
+  - `url`
+  - `randomurl`
+  - `unreal`
+  - `urlsniffer`
+
 ## Requirements
 - Python 3.10+
 - MySQL/MariaDB (required for dart stats, URL storage, and persistent channels)
@@ -41,7 +64,7 @@ A Python IRC bot with reconnect logic, command handling, URL sniffing, weather l
   - Define `networks` (required) and set per-network values (`server`, `port`, `use_tls`, `nick`, `channels`, ...)
   - Top-level values act as defaults for all entries in `networks`
   - Database settings: `mysql_host`, `mysql_port`, `mysql_user`, `mysql_password`, `mysql_database`
-  - Optional: `weather_default_location`, `youtube_api_key`, `language`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
+  - Optional: `weather_default_location`, `youtube_api_key`, `language`, `enabled_plugins`, `disabled_plugins`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
 5. Install dependencies:
   - `python -m pip install -r requirements.txt`
 
@@ -105,6 +128,8 @@ Examples:
 ## Commands
 Default prefix: `!`
 
+The following commands are available when the corresponding plugins are enabled:
+
 - `!help` / `!hilfe`
 - `!ping [nick]`
 - `!pong [nick]`
@@ -124,6 +149,10 @@ Notes:
 - If `!dart` has no argument, the caller nickname is used.
 - `!lag` measures latency in nanoseconds and displays a readable millisecond value (for sub-millisecond latency as decimal, e.g. `0.123 ms`) plus raw `ns` in parentheses.
 - If `weather_default_location` is set, weather can be requested without arguments.
+
+Trigger plugins:
+- `unreal`: replies with an action when a message contains `unreal`
+- `urlsniffer`: scans posted URLs and stores/sniffs them automatically
 
 ## URL and YouTube Behavior
 - Posted URLs are normalized and processed once per runtime session.
@@ -168,6 +197,9 @@ See `config.example.json` for all available options, including:
   - `enabled` can disable a network without deleting its config (recommended instead of commenting, since JSON has no comments)
   - `reconnect_delay_seconds` controls reconnect interval per network
   - `network_key` can be used to control channel persistence key in `bot_channels.network` (must be unique)
+- Plugin control:
+  - `enabled_plugins` loads only the listed plugins for a network when not empty
+  - `disabled_plugins` excludes listed plugins when `enabled_plugins` is empty
 
 ## License
 This project is licensed under the MIT License. See `LICENSE` for details.

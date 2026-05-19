@@ -23,6 +23,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
+from plugin_system import MessageContext, PluginManager
+
 try:
     import pymysql
 except ImportError:
@@ -117,54 +119,6 @@ DANGEROUS_CONTENT_TYPES = frozenset({
     "application/vnd.ms-htmlhelp",
 })
 
-WEATHER_CODE_MAP_DE = {
-    0: "klar",
-    1: "ueberwiegend klar",
-    2: "leicht bewolkt",
-    3: "bewolkt",
-    45: "Nebel",
-    48: "Reifnebel",
-    51: "leichter Nieselregen",
-    53: "Nieselregen",
-    55: "starker Nieselregen",
-    61: "leichter Regen",
-    63: "Regen",
-    65: "starker Regen",
-    71: "leichter Schneefall",
-    73: "Schneefall",
-    75: "starker Schneefall",
-    80: "Regenschauer",
-    81: "starke Regenschauer",
-    82: "heftige Regenschauer",
-    95: "Gewitter",
-    96: "Gewitter mit Hagel",
-    99: "Gewitter mit Hagel",
-}
-
-WEATHER_CODE_MAP_EN = {
-    0: "clear",
-    1: "mostly clear",
-    2: "partly cloudy",
-    3: "cloudy",
-    45: "fog",
-    48: "depositing rime fog",
-    51: "light drizzle",
-    53: "drizzle",
-    55: "dense drizzle",
-    61: "light rain",
-    63: "rain",
-    65: "heavy rain",
-    71: "light snow",
-    73: "snow",
-    75: "heavy snow",
-    80: "rain showers",
-    81: "strong rain showers",
-    82: "violent rain showers",
-    95: "thunderstorm",
-    96: "thunderstorm with hail",
-    99: "thunderstorm with hail",
-}
-
 
 @dataclass
 class BotConfig:
@@ -205,6 +159,8 @@ class BotConfig:
     url_timeout_seconds: float = 3.0
     url_sniff_max_bytes: int = 65536
     url_max_content_length_bytes: int = 2097152
+    enabled_plugins: list[str] | None = None
+    disabled_plugins: list[str] | None = None
 
     @staticmethod
     def _from_raw(raw: dict[str, object]) -> "BotConfig":
@@ -222,6 +178,13 @@ class BotConfig:
 
         language_raw = str(raw.get("language", "de")).strip().lower()
         language = language_raw if language_raw in {"de", "en"} else "de"
+
+        def _parse_string_list(value: object) -> list[str]:
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, list):
+                return [str(item) for item in value]
+            return []
 
         configured_network_key = str(raw.get("network_key", "")).strip()
         network_key = configured_network_key or f"{server}:{port}:{nick}".lower()
@@ -264,6 +227,8 @@ class BotConfig:
             url_timeout_seconds=max(0.5, float(raw.get("url_timeout_seconds", 3.0))),
             url_sniff_max_bytes=max(1024, int(raw.get("url_sniff_max_bytes", 65536))),
             url_max_content_length_bytes=max(65536, int(raw.get("url_max_content_length_bytes", 2097152))),
+            enabled_plugins=_parse_string_list(raw.get("enabled_plugins", [])),
+            disabled_plugins=_parse_string_list(raw.get("disabled_plugins", [])),
         )
 
     @staticmethod
@@ -328,68 +293,16 @@ class IRCBot:
         self.startup_actions_completed = False
         self._send_lock = threading.RLock()
         self._url_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="urlsniff")
+        self.plugin_manager = PluginManager(self, Path(__file__).resolve().parent / "plugins")
 
     def tr(self, key: str, **kwargs) -> str:
         language = self.config.language if self.config.language in {"de", "en"} else "de"
-        messages = {
+        core_messages = {
             "de": {
                 "not_connected": "Nicht verbunden",
                 "sasl_failed": "SASL-Authentifizierung fehlgeschlagen.",
                 "nick_taken": "Nickname {old_nick} ist belegt, verwende {new_nick}",
                 "channel_not_joinable": "Channel nicht joinbar, entferne aus Liste: {channel}",
-                "help": "Befehle: {prefix}help, {prefix}ping, {prefix}echo <text>, {prefix}slap <nick>, {prefix}dart <nick>, {prefix}darttop10, {prefix}wetter <ort>, {prefix}url <id>, {prefix}randomurl",
-                "lag_now": "Aktueller Lag: {ms} ms ({ns} ns)",
-                "usage_echo": "Nutzung: {prefix}{command} <text>",
-                "usage_slap": "Nutzung: {prefix}{command} <nick>",
-                "usage_dart": "Nutzung: {prefix}{command} <nick>",
-                "self_target": "sich selbst",
-                "usage_weather": "Nutzung: {prefix}{command} <ort>",
-                "usage_url": "Nutzung: {prefix}{command} <id>",
-                "usage_url_with_max": "Nutzung: {prefix}{command} <id> (max: {max_id})",
-                "url_not_found": "URL nicht gefunden.",
-                "url_blocked": "URL geblockt (Spamverdacht).",
-                "url_dead": "URL ist tot oder keine HTML-Seite.",
-                "url_no_html": "Hier ist kein HTML-Inhalt.",
-                "url_dangerous_file": "⚠ Sicherheitswarnung",
-                "url_too_large": "URL ist zu gross zum Sniffen.",
-                "url_max_id": "Max-ID {max_id}",
-                "url_error": "URL Fehler: {message}",
-                "url_no_html_topic": "{url} (kein HTML-Topic gefunden)",
-                "url_without_title": "{url} :: {topic} (ohne title) (Requested by {requested_by})",
-                "yt_channel": "Kanal {channel}",
-                "yt_duration": "Dauer {duration}",
-                "yt_published": "veröffentlicht {published}",
-                "yt_views": "{count} Aufrufe",
-                "yt_likes": "{count} Likes",
-                "yt_comments": "{count} Kommentare",
-                "weather_not_found": "Wetter für {location}: Ort nicht gefunden.",
-                "weather_unreachable": "Wetter für {location}: Daten nicht erreichbar.",
-                "weather_for": "Wetter für {location}: {temperature}°C, {condition}, gefühlt {feels_like}°C, Luftfeuchtigkeit {humidity}%, Niederschlag {precipitation} mm, Wind {wind_speed} km/h",
-                "weather_short": "Wetter für {location}: {condition}",
-                "weather_cc": "Wetter für {location}",
-                "humidity": "Luftfeuchtigkeit",
-                "precipitation": "Niederschlag",
-                "wind": "Wind",
-                "yt_api_no_metadata": "YouTube-API konnte keine Metadaten liefern.",
-                "yt_invalid_id": "Keine gueltige YouTube-Video-ID gefunden.",
-                "yt_missing_key": "YouTube-API-Key fehlt in der Konfiguration.",
-                "yt_api_unreachable": "YouTube-API nicht erreichbar.",
-                "unknown_error": "unbekannter Fehler",
-                "yt_no_data": "YouTube-API lieferte keine Video-Daten.",
-                "yt_no_title": "YouTube-API lieferte keinen Titel.",
-                "unknown": "unbekannt",
-                "dart_db_missing_pkg": "Fehler: Python-Paket 'pymysql' fehlt. Bitte 'pip install -r requirements.txt' ausfuehren.",
-                "dart_db_unreachable": "Dart-DB nicht erreichbar: {error}",
-                "dart_top_failed": "Dart-Top10 fehlgeschlagen: {error}",
-                "dart_no_data": "Keine Dart-Daten vorhanden.",
-                "dart_top": "Dart Top10: {items}",
-                "dart_top_entry": "{index}. {nick} {points}P/{throws}W",
-                "dart_hit": "{bot} benutzt {target} als Dartpfeil und trifft {hit} ({points} Punkte) (Requested by {requested_by})",
-                "dart_destroy": "{bot} benutzt {target} als Dartpfeil und zerstoert die Dartscheibe! ({points} Punkte) ({hit}) (Requested by {requested_by})",
-                "dart_stats_missing_pkg": "Dart-Stats nicht verfuegbar: Python-Paket 'pymysql' fehlt.",
-                "dart_stats_unavailable": "Dart-Stats momentan nicht verfuegbar.",
-                "dart_stats_empty": "Du hast noch keine Dart-Statistiken.",
-                "dart_stats": "Deine Dart-Stats: {points} Punkte aus {throws} Würfen (Ø {average}) | Rang #{rank}/{total}",
                 "db_setup_skip": "Hinweis: Konnte MySQL-Server nicht erreichen, DB-Setup wird uebersprungen.",
                 "db_create_failed": "Hinweis: DB-Erstellung fehlgeschlagen: {error}",
                 "db_connect_failed": "Hinweis: Konnte keine Verbindung zur Bot-Datenbank herstellen.",
@@ -406,59 +319,6 @@ class IRCBot:
                 "sasl_failed": "SASL authentication failed.",
                 "nick_taken": "Nickname {old_nick} is taken, using {new_nick}",
                 "channel_not_joinable": "Channel not joinable, removing from list: {channel}",
-                "help": "Commands: {prefix}help, {prefix}ping, {prefix}echo <text>, {prefix}slap <nick>, {prefix}dart <nick>, {prefix}darttop10, {prefix}wetter <location>, {prefix}url <id>, {prefix}randomurl",
-                "lag_now": "Current lag: {ms} ms ({ns} ns)",
-                "usage_echo": "Usage: {prefix}{command} <text>",
-                "usage_slap": "Usage: {prefix}{command} <nick>",
-                "usage_dart": "Usage: {prefix}{command} <nick>",
-                "self_target": "themselves",
-                "usage_weather": "Usage: {prefix}{command} <location>",
-                "usage_url": "Usage: {prefix}{command} <id>",
-                "usage_url_with_max": "Usage: {prefix}{command} <id> (max: {max_id})",
-                "url_not_found": "URL not found.",
-                "url_blocked": "URL blocked (suspected spam).",
-                "url_dead": "URL is dead or not an HTML page.",
-                "url_no_html": "There is no HTML content here.",
-                "url_dangerous_file": "⚠ Security warning",
-                "url_too_large": "URL is too large to sniff.",
-                "url_max_id": "Max ID {max_id}",
-                "url_error": "URL error: {message}",
-                "url_no_html_topic": "{url} (no HTML topic found)",
-                "url_without_title": "{url} :: {topic} (without title) (Requested by {requested_by})",
-                "yt_channel": "Channel {channel}",
-                "yt_duration": "Duration {duration}",
-                "yt_published": "published {published}",
-                "yt_views": "{count} views",
-                "yt_likes": "{count} likes",
-                "yt_comments": "{count} comments",
-                "weather_not_found": "Weather for {location}: location not found.",
-                "weather_unreachable": "Weather for {location}: data unavailable.",
-                "weather_for": "Weather for {location}: {temperature}°C, {condition}, feels like {feels_like}°C, humidity {humidity}%, precipitation {precipitation} mm, wind {wind_speed} km/h",
-                "weather_short": "Weather for {location}: {condition}",
-                "weather_cc": "Weather for {location}",
-                "humidity": "Humidity",
-                "precipitation": "Precipitation",
-                "wind": "Wind",
-                "yt_api_no_metadata": "YouTube API returned no metadata.",
-                "yt_invalid_id": "No valid YouTube video ID found.",
-                "yt_missing_key": "YouTube API key is missing in config.",
-                "yt_api_unreachable": "YouTube API unavailable.",
-                "unknown_error": "unknown error",
-                "yt_no_data": "YouTube API returned no video data.",
-                "yt_no_title": "YouTube API returned no title.",
-                "unknown": "unknown",
-                "dart_db_missing_pkg": "Error: Python package 'pymysql' is missing. Run 'pip install -r requirements.txt'.",
-                "dart_db_unreachable": "Dart DB not reachable: {error}",
-                "dart_top_failed": "Dart Top10 failed: {error}",
-                "dart_no_data": "No dart data available.",
-                "dart_top": "Dart Top 10: {items}",
-                "dart_top_entry": "{index}. {nick} {points}pts/{throws}th",
-                "dart_hit": "{bot} uses {target} as a dart and hits {hit} ({points} points) (Requested by {requested_by})",
-                "dart_destroy": "{bot} uses {target} as a dart and destroys the dartboard! ({points} points) ({hit}) (Requested by {requested_by})",
-                "dart_stats_missing_pkg": "Dart stats unavailable: Python package 'pymysql' is missing.",
-                "dart_stats_unavailable": "Dart stats are currently unavailable.",
-                "dart_stats_empty": "You do not have any dart stats yet.",
-                "dart_stats": "Your dart stats: {points} points from {throws} throws (avg {average}) | Rank #{rank}/{total}",
                 "db_setup_skip": "Notice: Could not reach MySQL server, skipping DB setup.",
                 "db_create_failed": "Notice: DB creation failed: {error}",
                 "db_connect_failed": "Notice: Could not connect to bot database.",
@@ -471,7 +331,17 @@ class IRCBot:
                 "reconnect_in": "Reconnect in {seconds} seconds ...",
             },
         }
-        template = messages.get(language, messages["de"]).get(key, key)
+        plugin_manager = getattr(self, "plugin_manager", None)
+        plugin_template = None if plugin_manager is None else plugin_manager.translation(key, language)
+        if plugin_template is None and language != "de" and plugin_manager is not None:
+            plugin_template = plugin_manager.translation(key, "de")
+
+        template = plugin_template
+        if template is None:
+            template = core_messages.get(language, core_messages["de"]).get(
+                key,
+                core_messages["de"].get(key, key),
+            )
         return template.format(**kwargs)
 
     def connect(self) -> None:
@@ -711,58 +581,17 @@ class IRCBot:
         self.last_nick_reclaim_attempt_at = now
 
     def command_aliases(self) -> dict[str, list[str]]:
-        aliases = {
-            "help": ["help", "hilfe"],
-            "ping": ["ping"],
-            "pong": ["pong"],
-            "lag": ["lag"],
-            "echo": ["echo"],
-            "slap": ["slap"],
-            "dart": ["dart"],
-            "darttop10": ["darttop10"],
-            "mydartstats": ["mydartstats", "meinedartstats"],
-            "weather": ["weather", "wetter"],
-            "url": ["url"],
-            "randomurl": ["randomurl", "zufallsurl"],
-        }
-        return aliases
+        return self.plugin_manager.command_aliases()
 
     def primary_command_name(self, canonical: str) -> str:
-        language = self.config.language
-        if canonical == "help":
-            return "hilfe" if language == "de" else "help"
-        if canonical == "weather":
-            return "wetter" if language == "de" else "weather"
-        if canonical == "randomurl":
-            return "zufallsurl" if language == "de" else "randomurl"
-        if canonical == "mydartstats":
-            return "meinedartstats" if language == "de" else "mydartstats"
-        return canonical
+        return self.plugin_manager.primary_command_name(canonical, self.config.language)
 
     def resolve_command(self, token: str) -> str | None:
-        lowered = token.lower()
-        for canonical, aliases in self.command_aliases().items():
-            if lowered in aliases:
-                return canonical
-        return None
+        command = self.plugin_manager.resolve_command(token)
+        return command.canonical if command is not None else None
 
-    def build_help_text(self, prefix: str) -> str:
-        ordered = ["help", "ping", "pong", "lag", "echo", "slap", "dart", "darttop10", "mydartstats", "weather", "url", "randomurl"]
-        rendered = []
-        for name in ordered:
-            cmd = self.primary_command_name(name)
-            if name in {"echo"}:
-                rendered.append(f"{prefix}{cmd} <text>")
-            elif name in {"slap", "dart"}:
-                rendered.append(f"{prefix}{cmd} <nick>")
-            elif name == "weather":
-                rendered.append(f"{prefix}{cmd} <{'ort' if self.config.language == 'de' else 'location'}>")
-            elif name == "url":
-                rendered.append(f"{prefix}{cmd} <id>")
-            else:
-                rendered.append(f"{prefix}{cmd}")
-        label = "Befehle" if self.config.language == "de" else "Commands"
-        return f"{label}: " + ", ".join(rendered)
+    def build_help_entries(self, prefix: str) -> tuple[str, ...]:
+        return self.plugin_manager.build_help_entries(prefix, self.config.language)
 
     def send_lag_probe(self, reply_target: str) -> None:
         token = f"lag-{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
@@ -1013,112 +842,16 @@ class IRCBot:
                 self.handle_privmsg(source_nick, target, message)
 
     def handle_privmsg(self, source_nick: str, target: str, message: str) -> None:
-        self.schedule_url_sniff(message, target, source_nick)
-
-        if re.search(r"\bunreal\b", message, re.IGNORECASE):
-            action_target = source_nick if target.lower() == self.current_nick.lower() else target
-            self.send_action(action_target, "rocketjumps!")
-
         prefix = self.config.command_prefix
-        if not message.startswith(prefix):
-            return
-
-        cmdline = message[len(prefix) :].strip()
-        if not cmdline:
-            return
-
-        parts = cmdline.split(maxsplit=1)
-        command = parts[0].lower()
-        arg = parts[1] if len(parts) > 1 else ""
-        command = self.resolve_command(command) or command
-
         reply_target = source_nick if target.lower() == self.current_nick.lower() else target
-
-        if command == "help":
-            self.send_notice(source_nick, self.build_help_text(prefix))
-            return
-
-        if command == "ping":
-            target_nick = arg.strip() if arg.strip() else source_nick
-            self.send_action(reply_target, f"slaps {self.format_target_nick(target_nick)} around a bit with a large !pong")
-            return
-
-        if command == "pong":
-            target_nick = arg.strip() if arg.strip() else source_nick
-            self.send_action(reply_target, f"slaps {self.format_target_nick(target_nick)} around a bit with a large !ping")
-            return
-
-        if command == "lag":
-            self.send_lag_probe(reply_target)
-            return
-
-        if command == "echo":
-            if arg:
-                self.send_notice(source_nick, arg)
-            else:
-                self.send_notice(source_nick, self.tr("usage_echo", prefix=prefix, command=self.primary_command_name("echo")))
-            return
-
-        if command == "slap":
-            target_nick = arg.strip() if arg.strip() else source_nick
-            if not target_nick:
-                self.send_privmsg(reply_target, self.tr("usage_slap", prefix=prefix, command=self.primary_command_name("slap")))
-                return
-
-            self.send_action(
-                reply_target,
-                f"slaps {target_nick} around a bit with a large {self.current_nick}",
-            )
-            return
-
-        if command == "dart":
-            if arg.strip().lower() == "top10":
-                leaderboard = self.get_dart_top10_text()
-                self.send_privmsg(reply_target, leaderboard)
-                return
-
-            target_nick = arg.strip() if arg.strip() else source_nick
-            if not target_nick:
-                self.send_privmsg(reply_target, self.tr("usage_dart", prefix=prefix, command=self.primary_command_name("dart")))
-                return
-
-            stats_text = self.get_dart_stats_text(target_nick, source_nick)
-            self.send_privmsg(reply_target, stats_text)
-            return
-
-        if command == "darttop10":
-            leaderboard = self.get_dart_top10_text()
-            self.send_privmsg(reply_target, leaderboard)
-            return
-
-        if command == "mydartstats":
-            stats_text = self.get_my_dart_stats_text(source_nick)
-            self.send_notice(source_nick, stats_text)
-            return
-
-        if command == "weather":
-            weather_text = self.get_weather_text(arg.strip(), prefix, reply_target)
-            self.send_privmsg(reply_target, weather_text)
-            return
-
-        if command == "url":
-            if not arg.strip():
-                self.send_privmsg(reply_target, self.build_url_usage_text(prefix))
-                return
-
-            url_id = self.parse_int(arg.strip())
-            if url_id is None:
-                self.send_privmsg(reply_target, self.build_url_usage_text(prefix))
-                return
-
-            result = self.fetch_url_by_id(url_id)
-            self.handle_url_result(result, reply_target, requested_by=source_nick, show_max_id=True)
-            return
-
-        if command == "randomurl":
-            result = self.fetch_random_url()
-            self.handle_url_result(result, reply_target, requested_by=source_nick, show_max_id=True)
-            return
+        context = MessageContext(
+            source_nick=source_nick,
+            target=target,
+            message=message,
+            reply_target=reply_target,
+            command_prefix=prefix,
+        )
+        self.plugin_manager.handle_privmsg(context)
 
     def build_url_usage_text(self, prefix: str) -> str:
         max_id = self.get_max_url_id()
@@ -1132,6 +865,8 @@ class IRCBot:
         return target_nick
 
     def get_weather_text(self, location_query: str, command_prefix: str, reply_target: str) -> str:
+        from plugins.weather.plugin import WEATHER_CODE_MAPS
+
         location = location_query.strip() or self.config.weather_default_location.strip()
         if not location:
             return self.tr("usage_weather", prefix=command_prefix, command=self.primary_command_name("weather"))
@@ -1164,7 +899,7 @@ class IRCBot:
         precipitation = current.get("precipitation")
         wind_speed = current.get("wind_speed_10m")
         wind_direction = current.get("wind_direction_10m")
-        weather_map = WEATHER_CODE_MAP_EN if self.config.language == "en" else WEATHER_CODE_MAP_DE
+        weather_map = WEATHER_CODE_MAPS.get(self.config.language, WEATHER_CODE_MAPS["de"])
         condition = weather_map.get(int(weather_code), f"Code {weather_code}") if weather_code is not None else self.tr("unknown")
         temperature_text = self.format_localized_number(temperature)
         feels_like_text = self.format_localized_number(feels_like)

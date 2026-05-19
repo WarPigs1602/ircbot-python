@@ -65,6 +65,8 @@
   "mysql_database": "nullbot",
   "weather_default_location": "",
   "youtube_api_key": "",
+  "enabled_plugins": [],
+  "disabled_plugins": [],
   "url_timeout_seconds": 3.0,
   "url_sniff_max_bytes": 65536,
   "url_max_content_length_bytes": 2097152,
