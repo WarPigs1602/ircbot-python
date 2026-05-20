@@ -353,6 +353,7 @@ class IRCBot:
         self.seen_sniffed_urls: set[str] = set()
         self.channel_modes: dict[str, set[str]] = {}
         self.channel_members: dict[str, dict[str, str]] = {}
+        self._member_mode_retry_at: dict[tuple[str, str, str], float] = {}
         self.db_initialized = False
         self.cap_negotiation_active = False
         self.sasl_payload_sent = False
@@ -696,6 +697,7 @@ class IRCBot:
         cleaned_nick = self.strip_channel_member_prefixes(nick)
         if not normalized_channel or not cleaned_nick:
             return
+        self.clear_member_mode_retry(normalized_channel, cleaned_nick)
         members = self.channel_members.setdefault(normalized_channel, {})
         members[cleaned_nick.lower()] = cleaned_nick
 
@@ -708,6 +710,7 @@ class IRCBot:
         cleaned_nick = self.strip_channel_member_prefixes(nick)
         if not normalized_channel or not cleaned_nick:
             return
+        self.clear_member_mode_retry(normalized_channel, cleaned_nick)
         members = self.channel_members.get(normalized_channel)
         if members is not None:
             members.pop(cleaned_nick.lower(), None)
@@ -717,6 +720,8 @@ class IRCBot:
         cleaned_new_nick = self.strip_channel_member_prefixes(new_nick)
         if not cleaned_old_nick or not cleaned_new_nick:
             return
+        for channel in tuple(self.channel_members):
+            self.clear_member_mode_retry(channel, cleaned_old_nick)
         lowered_old_nick = cleaned_old_nick.lower()
         lowered_new_nick = cleaned_new_nick.lower()
         for members in self.channel_members.values():
@@ -728,6 +733,8 @@ class IRCBot:
         cleaned_nick = self.strip_channel_member_prefixes(nick)
         if not cleaned_nick:
             return
+        for channel in tuple(self.channel_members):
+            self.clear_member_mode_retry(channel, cleaned_nick)
         lowered_nick = cleaned_nick.lower()
         for members in self.channel_members.values():
             members.pop(lowered_nick, None)
@@ -752,6 +759,8 @@ class IRCBot:
 
     def normalize_member_mode(self, mode_or_prefix: str) -> str | None:
         token = mode_or_prefix.strip()
+        if len(token) == 2 and token[0] in {"+", "-"}:
+            token = token[1:]
         if len(token) != 1:
             return None
 
@@ -794,7 +803,34 @@ class IRCBot:
     def remove_member_mode(self, channel: str, nick: str, mode: str) -> None:
         if not channel or not nick or not mode:
             return
+        self.clear_member_mode_retry(channel, nick, mode)
         self.send_raw(f"MODE {channel} -{mode} {nick}")
+
+    def clear_member_mode_retry(self, channel: str, nick: str, mode: str = "") -> None:
+        normalized_channel = self.normalize_channel_name(channel)
+        cleaned_nick = self.strip_channel_member_prefixes(nick).lower()
+        if not normalized_channel or not cleaned_nick:
+            return
+        for key in tuple(self._member_mode_retry_at):
+            cached_channel, cached_nick, cached_mode = key
+            if cached_channel != normalized_channel or cached_nick != cleaned_nick:
+                continue
+            if mode and cached_mode != mode:
+                continue
+            self._member_mode_retry_at.pop(key, None)
+
+    def should_retry_member_mode(self, channel: str, nick: str, mode: str, cooldown_seconds: float) -> bool:
+        normalized_channel = self.normalize_channel_name(channel)
+        cleaned_nick = self.strip_channel_member_prefixes(nick).lower()
+        if not normalized_channel or not cleaned_nick or not mode:
+            return False
+        key = (normalized_channel, cleaned_nick, mode)
+        now = time.monotonic()
+        retry_at = self._member_mode_retry_at.get(key, 0.0)
+        if retry_at > now:
+            return False
+        self._member_mode_retry_at[key] = now + max(1.0, cooldown_seconds)
+        return True
 
     def remember_channel(self, channel: str) -> None:
         normalized_channel = channel.strip()
@@ -812,6 +848,9 @@ class IRCBot:
         self.config.channels = [ch for ch in self.config.channels if ch.lower() != normalized_channel.lower()]
         self.channel_modes.pop(normalized_channel, None)
         self.channel_members.pop(self.normalize_channel_name(normalized_channel), None)
+        for key in tuple(self._member_mode_retry_at):
+            if key[0] == self.normalize_channel_name(normalized_channel):
+                self._member_mode_retry_at.pop(key, None)
         self.delete_saved_channel(normalized_channel)
 
     def merge_saved_channels(self) -> None:
@@ -1177,6 +1216,10 @@ class IRCBot:
         is_private_message = target.lower() == self.current_nick.lower()
         reply_target = source_nick if is_private_message else target
         source_mask = self.user_mask_from_parts(source_ident, source_host) or ""
+        if not is_private_message and source_ident and source_host:
+            for mode in self.get_user_channel_modes(source_mask, target):
+                if self.should_retry_member_mode(target, source_nick, mode, 60.0):
+                    self.apply_member_mode(target, source_nick, mode)
         context = MessageContext(
             source_nick=source_nick,
             source_ident=source_ident,
@@ -4618,13 +4661,6 @@ class IRCBot:
 
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
-                    (self.config.network_key, normalized_mask),
-                )
-                if cur.fetchone() is None:
-                    return False, f"Benutzer {normalized_mask} existiert nicht."
-
                 if enabled:
                     cur.execute(
                         """
@@ -4709,10 +4745,14 @@ class IRCBot:
         return True
 
     def get_user_channel_modes(self, user_mask: str, channel: str) -> tuple[str, ...]:
-        if not self.is_admin_session_active(user_mask):
+        configured_modes = self.get_configured_user_channel_modes(user_mask, channel)
+        if not configured_modes:
             return ()
 
-        configured_modes = self.get_configured_user_channel_modes(user_mask, channel)
+        admin_row = self.load_admin_user(user_mask)
+        if admin_row is not None and bool(int(admin_row.get("is_admin", 0))) and not self.is_admin_session_active(user_mask):
+            return ()
+
         return configured_modes[:1]
 
     def get_user_assigned_channels(self, user_mask: str) -> tuple[str, ...]:
@@ -4803,17 +4843,29 @@ class IRCBot:
 
     def apply_channel_modes_for_mask(self, channel: str, nick: str, user_mask: str) -> tuple[bool, str]:
         normalized_mask = self.normalize_user_mask(user_mask)
+        normalized_channel = self.normalize_channel_name(channel)
+        target_nick = self.strip_channel_member_prefixes(nick)
         if normalized_mask is None:
             return False, INVALID_HOSTMASK_MESSAGE
+        if not normalized_channel.startswith("#"):
+            return False, "Ungültiger Channel."
+        if not target_nick:
+            return False, "Ungültiger Nick."
 
-        modes = self.get_user_channel_modes(normalized_mask, channel)
+        if not self.is_nick_in_channel(normalized_channel, self.current_nick):
+            return False, f"Bot ist nicht in {normalized_channel}."
+        if not self.is_nick_in_channel(normalized_channel, target_nick):
+            return False, f"Nick {target_nick} ist nicht in {normalized_channel}."
+
+        modes = self.get_configured_user_channel_modes(normalized_mask, normalized_channel)
         if not modes:
-            return False, f"Keine Rechte fuer {normalized_mask} in {channel} konfiguriert."
+            return False, f"Keine Rechte fuer {normalized_mask} in {normalized_channel} konfiguriert."
 
         for mode in modes:
-            self.apply_member_mode(channel, nick, mode)
+            self.clear_member_mode_retry(normalized_channel, target_nick, mode)
+            self.apply_member_mode(normalized_channel, target_nick, mode)
         rendered_modes = ", ".join(f"+{mode}" for mode in modes)
-        return True, f"Modi {rendered_modes} fuer {nick} in {channel} gesendet."
+        return True, f"Modi {rendered_modes} fuer {target_nick} in {normalized_channel} gesendet."
 
     @staticmethod
     def current_time_string() -> str:
