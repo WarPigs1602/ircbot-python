@@ -213,6 +213,7 @@ class BotConfig:
     sasl_password: str = ""
     sasl_authzid: str = ""
     language: str = "de"
+    flood_protection_enabled: bool = True
     flood_burst: int = 4
     flood_window_seconds: float = 2.0
     flood_min_interval_ms: int = 2000
@@ -284,6 +285,7 @@ class BotConfig:
             sasl_password=str(raw.get("sasl_password", "")),
             sasl_authzid=str(raw.get("sasl_authzid", "")),
             language=language,
+            flood_protection_enabled=bool(raw.get("flood_protection_enabled", True)),
             flood_burst=max(1, int(raw.get("flood_burst", 4))),
             flood_window_seconds=max(0.1, float(raw.get("flood_window_seconds", 2.0))),
             flood_min_interval_ms=max(0, int(raw.get("flood_min_interval_ms", 2000))),
@@ -352,6 +354,7 @@ class IRCBot:
         self.file = None
         self.seen_sniffed_urls: set[str] = set()
         self.channel_modes: dict[str, set[str]] = {}
+        self.user_modes: set[str] = set()
         self.channel_members: dict[str, dict[str, str]] = {}
         self._member_mode_retry_at: dict[tuple[str, str, str], float] = {}
         self.db_initialized = False
@@ -522,6 +525,7 @@ class IRCBot:
         with self._send_lock:
             if not self.sock:
                 raise RuntimeError(self.tr("not_connected"))
+            self.cache_own_user_mode_command(line)
             payload = (line + "\r\n").encode("utf-8")
             self.sock.sendall(payload)
             print(f">>> {line}")
@@ -577,6 +581,12 @@ class IRCBot:
             print(f"URL sniff worker failed: {exc}")
 
     def apply_flood_protection(self) -> None:
+        if not self.config.flood_protection_enabled:
+            return
+
+        if "B" in self.user_modes:
+            return
+
         now = time.monotonic()
 
         # Ensure a minimum delay between chat messages.
@@ -613,6 +623,10 @@ class IRCBot:
         normalized_channel = channel.strip()
         if normalized_channel:
             self.send_raw(f"MODE {normalized_channel}")
+
+    def request_user_modes(self) -> None:
+        if self.current_nick:
+            self.send_raw(f"MODE {self.current_nick}")
 
     def request_channel_members(self, channel: str) -> None:
         normalized_channel = channel.strip()
@@ -795,6 +809,27 @@ class IRCBot:
                 active.discard(char)
         self.channel_modes[channel] = active
 
+    def apply_user_mode_delta(self, mode_changes: str) -> None:
+        active = set(self.user_modes)
+        sign = "+"
+        for char in mode_changes:
+            if char in {"+", "-"}:
+                sign = char
+                continue
+            if sign == "+":
+                active.add(char)
+            else:
+                active.discard(char)
+        self.user_modes = active
+
+    def cache_own_user_mode_command(self, line: str) -> None:
+        parts = line.split()
+        if len(parts) < 3 or parts[0].upper() != "MODE":
+            return
+        if parts[1].startswith("#") or parts[1].lower() != self.current_nick.lower():
+            return
+        self.apply_user_mode_delta(parts[2])
+
     def apply_member_mode(self, channel: str, nick: str, mode: str) -> None:
         if not channel or not nick or not mode:
             return
@@ -898,10 +933,14 @@ class IRCBot:
             return
 
         self.run_perform_commands()
+        self.request_user_modes()
         self.join_channels(self.config.channels)
         for channel in self.config.channels:
             self.request_channel_modes(channel)
-        self.public_trigger_activation_at = time.monotonic() + 60.0
+        if self.config.flood_protection_enabled:
+            self.public_trigger_activation_at = time.monotonic() + 60.0
+        else:
+            self.public_trigger_activation_at = 0.0
         self.startup_actions_completed = True
 
     def public_triggers_enabled(self) -> bool:
@@ -1199,10 +1238,17 @@ class IRCBot:
                 self.channel_modes[channel] = self.parse_mode_snapshot(modes)
                 continue
 
+            if command == "221" and len(params) >= 2:
+                self.user_modes = self.parse_mode_snapshot(params[1])
+                continue
+
             if command == "MODE" and len(params) >= 2:
-                channel = params[0]
+                target = params[0]
                 modes = params[1]
-                self.apply_mode_delta(channel, modes)
+                if target.startswith("#"):
+                    self.apply_mode_delta(target, modes)
+                elif target.lower() == self.current_nick.lower():
+                    self.apply_user_mode_delta(modes)
                 continue
 
             if command == "PRIVMSG" and len(params) >= 2:

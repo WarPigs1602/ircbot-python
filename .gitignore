@@ -27,5 +27,7 @@ Thumbs.db
 .vscode/
 
 # Local optional components
+/plugins/immens/
 /plugins/moonface/
+/plugins/wahnsinn/
 /php/

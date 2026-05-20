@@ -45,7 +45,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
 - Joins and tracks multiple channels
 - Optional oidentd.conf generation for ident spoofing (`oidentd_conf` path)
 - Saves joined channels in MySQL and restores them on restart
-- Optional flood protection for outgoing chat messages
+- Optional per-network flood protection for outgoing chat messages
 - Optional SASL PLAIN authentication (`CAP` negotiation)
 - Optional NickServ identify command and nickname reclaiming
 - Optional `perform` commands after successful connect (for example: user mode)
@@ -217,7 +217,14 @@ Setup paths:
   - Define `networks` (required) and set per-network values (`server`, `port`, `use_tls`, `nick`, `channels`, ...)
   - Top-level values act as defaults for all entries in `networks`
   - Database settings: `mysql_host`, `mysql_port`, `mysql_user`, `mysql_password`, `mysql_database`
-  - Optional: `weather_default_location`, `youtube_api_key`, `language`, `enabled_plugins`, `disabled_plugins`, `raw_chat_logging_enabled`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
+  - Optional: `weather_default_location`, `youtube_api_key`, `language`, `enabled_plugins`, `disabled_plugins`, `raw_chat_logging_enabled`, `flood_protection_enabled`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
+
+Flood/spam delay behavior:
+
+- `flood_protection_enabled`: globally as default or per network override to fully enable/disable outgoing chat throttling
+- `flood_protection_enabled`: globally as default or per network override to fully enable/disable outgoing chat throttling and the startup delay for public triggers
+- `flood_min_interval_ms`: minimum delay between outgoing chat messages
+- `flood_burst` + `flood_window_seconds`: burst/window rate limiting for outgoing chat messages
 5. Install dependencies:
   - `python -m pip install -r requirements.txt`
 

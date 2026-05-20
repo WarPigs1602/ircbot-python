@@ -9,14 +9,29 @@ MESSAGES = {
         "help_admin_label": "Admin-Befehle:",
         "help_mg_admin_label": "Mondgesicht-Verwaltung:",
         "help_admin_login_label": "Admin-Login:",
+        "help_moonface_empty": "Keine Mondgesicht-Befehle für diesen Channel verfügbar.",
     },
     "en": {
         "help_label": "Commands",
         "help_admin_label": "Admin commands:",
         "help_mg_admin_label": "Moonface management:",
         "help_admin_login_label": "Admin login:",
+        "help_moonface_empty": "No Moonface commands are available for this channel.",
     },
 }
+
+MOONFACE_HELP_COMMANDS = (
+    "top",
+    "globaltop",
+    "mg",
+    "mggott",
+    "mgignore",
+    "mgstatus",
+    "mystats",
+    "mgstats",
+    "myglobalstats",
+    "globalstats",
+)
 
 ADMIN_HELP_ENTRIES = {
     "de": (
@@ -124,6 +139,27 @@ def admin_login_help_entries(bot, context) -> tuple[str, ...]:
     return login_entries
 
 
+def moonface_help_visible(bot, context) -> bool:
+    if context.is_private_message:
+        return False
+    if "moonface" not in bot.plugin_manager.loaded_plugins:
+        return False
+    active_channels = {channel.strip().lower() for channel in bot.mondgesicht_channels() if channel.strip()}
+    return bool(active_channels) and context.target.lower() in active_channels
+
+
+def moonface_help_entries(bot, context) -> tuple[str, ...]:
+    if not moonface_help_visible(bot, context):
+        return ()
+
+    all_entries = tuple(bot.build_help_entries(context.command_prefix, context))
+    prefixes = tuple(
+        f"{context.command_prefix}{bot.primary_command_name(canonical)}"
+        for canonical in MOONFACE_HELP_COMMANDS
+    )
+    return tuple(entry for entry in all_entries if entry.startswith(prefixes))
+
+
 def send_help_notices(
     bot,
     target: str,
@@ -172,6 +208,15 @@ def handle_help(bot, context, arg: str) -> None:
     worker.start()
 
 
+def handle_moonface_help(bot, context, arg: str) -> None:
+    entries = moonface_help_entries(bot, context)
+    if not entries:
+        bot.send_notice(context.source_nick, bot.tr("help_moonface_empty"))
+        return
+
+    send_help_notices(bot, context.source_nick, entries, (), (), ())
+
+
 PLUGIN = PluginSpec(
     name="help",
     translations=MESSAGES,
@@ -182,6 +227,18 @@ PLUGIN = PluginSpec(
             aliases=("hilfe",),
             primary_names={"de": "hilfe", "en": "help"},
             help_sort=10,
+        ),
+        CommandSpec(
+            canonical="moonfacehelp",
+            handler=handle_moonface_help,
+            aliases=("mondgesichthilfe",),
+            primary_names={"de": "mondgesichthilfe", "en": "moonfacehelp"},
+            help_texts={
+                "de": "zeigt die Mondgesicht-Befehle für den aktuellen Channel",
+                "en": "shows the Moonface commands for the current channel",
+            },
+            help_visible=moonface_help_visible,
+            help_sort=85,
         ),
     ),
 )

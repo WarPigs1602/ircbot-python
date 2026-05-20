@@ -18,6 +18,7 @@
       "perform": [
         "MODE {nick} +B"
       ],
+      "flood_protection_enabled": true,
       "reconnect_delay_seconds": 30,
       "raw_chat_logging_enabled": false,
       "sasl_enabled": false,
@@ -49,6 +50,7 @@
       "perform": [
         "MODE {nick} +B"
       ],
+      "flood_protection_enabled": true,
       "reconnect_delay_seconds": 30,
       "raw_chat_logging_enabled": false,
       "sasl_enabled": false,
@@ -74,6 +76,7 @@
   "enabled_plugins": [],
   "disabled_plugins": [],
   "raw_chat_logging_enabled": false,
+  "flood_protection_enabled": true,
   "url_timeout_seconds": 3.0,
   "url_sniff_max_bytes": 65536,
   "url_max_content_length_bytes": 2097152,
