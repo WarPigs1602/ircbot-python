@@ -77,7 +77,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
 - `lag` — Measures latency in milliseconds
 - `echo <text>` — Echoes text back to the user (sent as NOTICE)
 - `slap <nick>` — Performs a slap action on a user
-- `dart [nick]` — Shows dart game statistics for a user or caller
+- `dart [nick]` — Throws a dart at the nick
 - `darttop10` — Displays the top 10 dart players
 - `mydartstats` — Shows your personal dart statistics (sent as NOTICE)
 - `weather <location|plz>` — Looks up weather forecast using postal code or location name
