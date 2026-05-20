@@ -144,7 +144,8 @@ def moonface_help_visible(bot, context) -> bool:
         return False
     if "moonface" not in bot.plugin_manager.loaded_plugins:
         return False
-    active_channels = {channel.strip().lower() for channel in bot.mondgesicht_channels() if channel.strip()}
+    from plugins.moonface.plugin import mondgesicht_channels as _mondgesicht_channels
+    active_channels = {channel.strip().lower() for channel in _mondgesicht_channels(bot) if channel.strip()}
     return bool(active_channels) and context.target.lower() in active_channels
 
 
