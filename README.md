@@ -67,23 +67,27 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
 - Commands and triggers are loaded dynamically on bot startup.
 - If `enabled_plugins` is empty or omitted, all built-in plugins are loaded except those listed in `disabled_plugins`.
 - If `enabled_plugins` contains entries, only these plugins are loaded for that network.
-- Plugin names currently available:
-  - `help`
-  - `admin`
-  - `ping`
-  - `pong`
-  - `lag`
-  - `echo`
-  - `slap`
-  - `dart`
-  - `darttop10`
-  - `mydartstats`
-  - `weather`
-  - `url`
-  - `randomurl`
-  - `unreal`
-  - `immens`
-  - `urlsniffer`
+
+### Available Plugins
+
+**Commands:**
+- `help` — Displays available commands and their usage (sent as NOTICE)
+- `ping [nick]` — Sends a ping response
+- `pong [nick]` — Sends a pong response
+- `lag` — Measures latency in milliseconds
+- `echo <text>` — Echoes text back to the user (sent as NOTICE)
+- `slap <nick>` — Performs a slap action on a user
+- `dart [nick]` — Shows dart game statistics for a user or caller
+- `darttop10` — Displays the top 10 dart players
+- `mydartstats` — Shows your personal dart statistics (sent as NOTICE)
+- `weather <location|plz>` — Looks up weather forecast using postal code or location name
+- `url <id>` — Retrieves a stored URL from the database
+- `randomurl` — Retrieves a random URL from the database
+- `admin` — Provides administrative PM commands (user management, roles, channel modes, raw IRC commands)
+
+**Triggers:**
+- `unreal` — Replies with an action when a message contains the word "unreal"
+- `urlsniffer` — Automatically scans posted URLs, fetches HTML titles, and stores them in the database
 
 ## Example Basic Plugin
 A minimal command plugin consists of:
