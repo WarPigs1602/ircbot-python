@@ -5,30 +5,35 @@ from plugin_system import CommandSpec, MessageHandlerSpec, PluginSpec
 
 MESSAGES = {
     "de": {
-        "admin_help_overview": (
-            "Admin-PM Übersicht: "
-            "help [auth|users|roles|modes|raw]"
-        ),
-        "admin_help_auth": (
-            "Auth: login <passwort> | logout | whoami"
-        ),
-        "admin_help_users": (
-            "User: listusers | adduser <name> <ident@host> <passwort> [rolle] | "
-            "deluser <ident@host> | setrole <ident@host> <rolle>"
-        ),
-        "admin_help_roles": (
-            "Rollen: listroles | roleadd <rolle> [admin=on] [raw=on] | "
-            "roleflag <rolle> <admin|raw> <on|off>"
-        ),
-        "admin_help_modes": (
-            "Rechte: rolemode <rolle> <#channel> <modus> | rolemode-del <rolle> <#channel> <modus> | "
-            "usermode <ident@host> <#channel> <modus> | usermode-del <ident@host> <#channel> <modus> | "
-            "apply <nick> <#channel> <ident@host>"
-        ),
-        "admin_help_raw": (
-            "RAW: raw <IRC-RAW-Zeile> sendet die Zeile direkt an den Server, z.B. "
-            "raw MODE #chan +o Nick"
-        ),
+        "admin_help_overview": "Admin-PM Hilfe: help [{topics}]",
+        "admin_help_auth_1": "login <passwort> authentifiziert deine Hostmask für Admin-Befehle.",
+        "admin_help_auth_2": "logout beendet deine aktuelle Admin-Session.",
+        "admin_help_auth_3": "whoami zeigt deine aktuelle Rolle und gesetzte Rechte.",
+        "admin_help_users_1": "listusers listet alle gespeicherten Admin-Benutzer auf.",
+        "admin_help_users_2": "adduser <name> <ident@host> <passwort> [rolle] legt einen Benutzer an.",
+        "admin_help_users_3": "deluser <ident@host> entfernt einen Benutzer vollständig.",
+        "admin_help_users_4": "setrole <ident@host> <rolle> weist einem Benutzer eine andere Rolle zu.",
+        "admin_help_roles_1": "listroles zeigt alle Rollen mit Admin- und RAW-Rechten.",
+        "admin_help_roles_2": "roleadd <rolle> [admin=on] [raw=on] legt eine neue Rolle an.",
+        "admin_help_roles_3": "roleflag <rolle> <admin|raw> <on|off> schaltet ein Rollen-Flag um.",
+        "admin_help_modes_1": "rolemode <rolle> <#channel> <modus> erlaubt einen Channel-Modus für eine Rolle.",
+        "admin_help_modes_2": "rolemode-del <rolle> <#channel> <modus> entfernt diesen Rollen-Modus wieder.",
+        "admin_help_modes_3": "usermode <ident@host> <#channel> <modus> setzt eine benutzerspezifische Ausnahme.",
+        "admin_help_modes_4": "usermode-del <ident@host> <#channel> <modus> entfernt diese Benutzer-Ausnahme.",
+        "admin_help_modes_5": "apply <nick> <#channel> <ident@host> wendet die gespeicherten Modi sofort an.",
+        "admin_help_mg_1": "mgadd [de|en] <punkt|komma|strich> speichert einen neuen Mondgesicht-Text.",
+        "admin_help_mg_2": "mglist [de|en] [punkt|komma|strich] listet gespeicherte Mondgesicht-Texte auf.",
+        "admin_help_mg_3": "mgdel <id> löscht einen Mondgesicht-Text per ID.",
+        "admin_help_mg_4": "mgseed spielt die Standard-Mondgesicht-Texte erneut ein.",
+        "admin_help_mg_5": "mgchannels zeigt alle aktiven Mondgesicht-Channels.",
+        "admin_help_mg_6": "mgchannel-add <#channel> aktiviert Mondgesicht für einen Channel.",
+        "admin_help_mg_7": "mgchannel-del <#channel> deaktiviert Mondgesicht für einen Channel.",
+        "admin_help_mg_8": "mggott-add <#channel> <nick> trägt einen Mondgesicht-Gott channelspezifisch ein.",
+        "admin_help_mg_9": "mggott-del <#channel> <nick> entfernt einen Mondgesicht-Gott channelspezifisch.",
+        "admin_help_mg_10": "mgignore-add <#channel> <nick> trägt einen Mondgesicht-Ignore-Nick channelspezifisch ein.",
+        "admin_help_mg_11": "mgignore-del <#channel> <nick> entfernt einen Mondgesicht-Ignore-Nick channelspezifisch.",
+        "admin_help_raw_1": "raw <IRC-RAW-Zeile> sendet eine IRC-Zeile direkt an den Server.",
+        "admin_help_raw_2": "Beispiel: raw MODE #chan +o Nick",
         "admin_pm_only": "Administrative Befehle nur per privater Nachricht an den Bot.",
         "admin_prefix_forbidden": "Administrative Befehle im PM bitte ohne Prefix senden.",
         "admin_hostmask_missing": "Deine Hostmask ist unvollständig. Bitte mit ident@host verbinden.",
@@ -44,7 +49,7 @@ MESSAGES = {
         "admin_usage_usermode": "Nutzung: usermode <ident@host> <#channel> <modus>",
         "admin_usage_apply": "Nutzung: apply <nick> <#channel> <ident@host>",
         "admin_unknown": "Unbekannter Admin-Unterbefehl. help zeigt die Übersicht.",
-        "admin_help_unknown": "Unbekanntes Hilfethema. Erlaubt: auth, users, roles, modes, raw.",
+        "admin_help_unknown": "Unbekanntes Hilfethema. Erlaubt: {topics}.",
         "admin_roles_empty": "Keine Rollen konfiguriert.",
         "admin_users_empty": "Keine Benutzer konfiguriert.",
         "admin_whoami": "Du bist {mask} mit Rolle {role} (admin={admin}, raw={raw}).",
@@ -54,30 +59,35 @@ MESSAGES = {
         "admin_logout_missing": "Keine aktive Session.",
     },
     "en": {
-        "admin_help_overview": (
-            "Admin PM overview: "
-            "help [auth|users|roles|modes|raw]"
-        ),
-        "admin_help_auth": (
-            "Auth: login <password> | logout | whoami"
-        ),
-        "admin_help_users": (
-            "Users: listusers | adduser <name> <ident@host> <password> [role] | "
-            "deluser <ident@host> | setrole <ident@host> <role>"
-        ),
-        "admin_help_roles": (
-            "Roles: listroles | roleadd <role> [admin=on] [raw=on] | "
-            "roleflag <role> <admin|raw> <on|off>"
-        ),
-        "admin_help_modes": (
-            "Modes: rolemode <role> <#channel> <mode> | rolemode-del <role> <#channel> <mode> | "
-            "usermode <ident@host> <#channel> <mode> | usermode-del <ident@host> <#channel> <mode> | "
-            "apply <nick> <#channel> <ident@host>"
-        ),
-        "admin_help_raw": (
-            "RAW: raw <IRC raw line> sends the line directly to the server, e.g. "
-            "raw MODE #chan +o Nick"
-        ),
+        "admin_help_overview": "Admin PM help: help [{topics}]",
+        "admin_help_auth_1": "login <password> authenticates your hostmask for admin commands.",
+        "admin_help_auth_2": "logout ends your current admin session.",
+        "admin_help_auth_3": "whoami shows your current role and granted rights.",
+        "admin_help_users_1": "listusers shows all stored admin users.",
+        "admin_help_users_2": "adduser <name> <ident@host> <password> [role] creates a user.",
+        "admin_help_users_3": "deluser <ident@host> removes a user completely.",
+        "admin_help_users_4": "setrole <ident@host> <role> assigns a different role to a user.",
+        "admin_help_roles_1": "listroles shows all roles with admin and RAW rights.",
+        "admin_help_roles_2": "roleadd <role> [admin=on] [raw=on] creates a new role.",
+        "admin_help_roles_3": "roleflag <role> <admin|raw> <on|off> toggles one role flag.",
+        "admin_help_modes_1": "rolemode <role> <#channel> <mode> allows one channel mode for a role.",
+        "admin_help_modes_2": "rolemode-del <role> <#channel> <mode> removes that role mode again.",
+        "admin_help_modes_3": "usermode <ident@host> <#channel> <mode> creates a user-specific override.",
+        "admin_help_modes_4": "usermode-del <ident@host> <#channel> <mode> removes that user override.",
+        "admin_help_modes_5": "apply <nick> <#channel> <ident@host> applies the stored modes immediately.",
+        "admin_help_mg_1": "mgadd [de|en] <point|comma|stroke> stores a new Moonface text.",
+        "admin_help_mg_2": "mglist [de|en] [point|comma|stroke] lists stored Moonface texts.",
+        "admin_help_mg_3": "mgdel <id> deletes a Moonface text by ID.",
+        "admin_help_mg_4": "mgseed restores the built-in Moonface texts.",
+        "admin_help_mg_5": "mgchannels shows all active Moonface channels.",
+        "admin_help_mg_6": "mgchannel-add <#channel> enables Moonface for one channel.",
+        "admin_help_mg_7": "mgchannel-del <#channel> disables Moonface for one channel.",
+        "admin_help_mg_8": "mggod-add <#channel> <nick> stores one channel-specific Moonface god.",
+        "admin_help_mg_9": "mggod-del <#channel> <nick> removes one channel-specific Moonface god.",
+        "admin_help_mg_10": "mgignore-add <#channel> <nick> stores one channel-specific Moonface ignore nick.",
+        "admin_help_mg_11": "mgignore-del <#channel> <nick> removes one channel-specific Moonface ignore nick.",
+        "admin_help_raw_1": "raw <IRC raw line> sends one IRC line directly to the server.",
+        "admin_help_raw_2": "Example: raw MODE #chan +o Nick",
         "admin_pm_only": "Administrative commands only work in private messages to the bot.",
         "admin_prefix_forbidden": "Send administrative PM commands without the prefix.",
         "admin_hostmask_missing": "Your hostmask is incomplete. Please connect with ident@host.",
@@ -93,7 +103,7 @@ MESSAGES = {
         "admin_usage_usermode": "Usage: usermode <ident@host> <#channel> <mode>",
         "admin_usage_apply": "Usage: apply <nick> <#channel> <ident@host>",
         "admin_unknown": "Unknown admin subcommand. help shows the overview.",
-        "admin_help_unknown": "Unknown help topic. Allowed: auth, users, roles, modes, raw.",
+        "admin_help_unknown": "Unknown help topic. Allowed: {topics}.",
         "admin_roles_empty": "No roles configured.",
         "admin_users_empty": "No users configured.",
         "admin_whoami": "You are {mask} with role {role} (admin={admin}, raw={raw}).",
@@ -103,6 +113,18 @@ MESSAGES = {
         "admin_logout_missing": "No active session.",
     },
 }
+
+
+def has_mg_admin_help(bot) -> bool:
+    return "moonface" in bot.plugin_manager.loaded_plugins
+
+
+def admin_help_topics(bot) -> str:
+    topics = ["auth", "users", "roles", "modes"]
+    if has_mg_admin_help(bot):
+        topics.append("mg")
+    topics.append("raw")
+    return "|".join(topics)
 
 
 def parse_switch(value: str) -> bool | None:
@@ -119,34 +141,97 @@ def reply(bot, context, message: str) -> None:
 
 
 def reply_admin_help(bot, context, topic: str = "") -> None:
-    values: dict[str, str] = {}
     normalized_topic = topic.strip().lower()
+    admin_row = None
+    if context.is_private_message and context.source_mask:
+        admin_row = bot.get_authenticated_admin(context.source_mask, require_admin=True)
+    if admin_row is None:
+        reply(bot, context, bot.tr("admin_help_auth_1"))
+        return
+
+    help_sections = {
+        "": (
+            "admin_help_auth_1",
+            "admin_help_auth_2",
+            "admin_help_auth_3",
+            "admin_help_users_1",
+            "admin_help_users_2",
+            "admin_help_users_3",
+            "admin_help_users_4",
+            "admin_help_roles_1",
+            "admin_help_roles_2",
+            "admin_help_roles_3",
+            "admin_help_modes_1",
+            "admin_help_modes_2",
+            "admin_help_modes_3",
+            "admin_help_modes_4",
+            "admin_help_modes_5",
+            "admin_help_raw_1",
+            "admin_help_raw_2",
+        ),
+        "auth": ("admin_help_auth_1", "admin_help_auth_2", "admin_help_auth_3"),
+        "users": ("admin_help_users_1", "admin_help_users_2", "admin_help_users_3", "admin_help_users_4"),
+        "roles": ("admin_help_roles_1", "admin_help_roles_2", "admin_help_roles_3"),
+        "modes": (
+            "admin_help_modes_1",
+            "admin_help_modes_2",
+            "admin_help_modes_3",
+            "admin_help_modes_4",
+            "admin_help_modes_5",
+        ),
+        "raw": ("admin_help_raw_1", "admin_help_raw_2"),
+    }
+    if has_mg_admin_help(bot):
+        help_sections[""] = (
+            help_sections[""][:-2]
+            + (
+                "admin_help_mg_1",
+                "admin_help_mg_2",
+                "admin_help_mg_3",
+                "admin_help_mg_4",
+                "admin_help_mg_5",
+                "admin_help_mg_6",
+                "admin_help_mg_7",
+                "admin_help_mg_8",
+                "admin_help_mg_9",
+                "admin_help_mg_10",
+                "admin_help_mg_11",
+            )
+            + help_sections[""][-2:]
+        )
+        help_sections["mg"] = (
+            "admin_help_mg_1",
+            "admin_help_mg_2",
+            "admin_help_mg_3",
+            "admin_help_mg_4",
+            "admin_help_mg_5",
+            "admin_help_mg_6",
+            "admin_help_mg_7",
+            "admin_help_mg_8",
+            "admin_help_mg_9",
+            "admin_help_mg_10",
+            "admin_help_mg_11",
+        )
+
+    help_topics = admin_help_topics(bot)
 
     if not normalized_topic:
-        for key in (
-            "admin_help_overview",
-            "admin_help_auth",
-            "admin_help_users",
-            "admin_help_roles",
-            "admin_help_modes",
-            "admin_help_raw",
-        ):
-            reply(bot, context, bot.tr(key, **values))
+        reply(bot, context, bot.tr("admin_help_overview", topics=help_topics))
+        for key in help_sections[""]:
+            reply(bot, context, bot.tr(key))
         return
 
-    topic_key = {
-        "auth": "admin_help_auth",
-        "users": "admin_help_users",
-        "roles": "admin_help_roles",
-        "modes": "admin_help_modes",
-        "raw": "admin_help_raw",
-    }.get(normalized_topic)
-    if topic_key is None:
-        reply(bot, context, bot.tr("admin_help_unknown"))
-        reply(bot, context, bot.tr("admin_help_overview", **values))
+    if normalized_topic in {"mondgesicht", "moonface"}:
+        normalized_topic = "mg"
+
+    topic_keys = help_sections.get(normalized_topic)
+    if topic_keys is None:
+        reply(bot, context, bot.tr("admin_help_unknown", topics=help_topics))
+        reply(bot, context, bot.tr("admin_help_overview", topics=help_topics))
         return
 
-    reply(bot, context, bot.tr(topic_key, **values))
+    for key in topic_keys:
+        reply(bot, context, bot.tr(key))
 
 
 def require_private(bot, context) -> bool:
@@ -226,6 +311,7 @@ def is_prefixed_admin_message(context) -> bool:
 
     token = without_prefix.split(maxsplit=1)[0]
     return token in {
+        "admin",
         "login",
         "logout",
         "whoami",
@@ -241,6 +327,7 @@ def is_prefixed_admin_message(context) -> bool:
         "usermode",
         "usermode-del",
         "apply",
+        "raw",
     }
 
 
@@ -479,11 +566,11 @@ def handle_admin_authenticated(bot, context, parts: list[str], source_mask: str,
 
 
 def handle_admin(bot, context, arg: str) -> None:
-    if context.message.startswith(context.command_prefix):
-        reply(bot, context, bot.tr("admin_prefix_forbidden"))
+    if not require_private(bot, context):
         return
 
-    if not require_private(bot, context):
+    if context.message.startswith(context.command_prefix):
+        reply(bot, context, bot.tr("admin_prefix_forbidden"))
         return
 
     source_mask = require_hostmask(bot, context)
@@ -520,12 +607,12 @@ def handle_admin(bot, context, arg: str) -> None:
 
 
 def handle_raw(bot, context, arg: str) -> None:
-    if context.message.startswith(context.command_prefix):
-        reply(bot, context, bot.tr("admin_prefix_forbidden"))
-        return
-
     admin_row = require_admin(bot, context)
     if admin_row is None:
+        return
+
+    if context.message.startswith(context.command_prefix):
+        reply(bot, context, bot.tr("admin_prefix_forbidden"))
         return
 
     if not bool(int(admin_row.get("can_raw", 0))):
@@ -554,20 +641,5 @@ PLUGIN = PluginSpec(
     translations=MESSAGES,
     message_handlers=(
         MessageHandlerSpec(handler=handle_admin_message),
-    ),
-    commands=(
-        CommandSpec(
-            canonical="admin",
-            handler=handle_admin,
-            aliases=("adm",),
-            help_args={"de": "help", "en": "help"},
-            help_sort=5,
-        ),
-        CommandSpec(
-            canonical="raw",
-            handler=handle_raw,
-            help_args={"de": "<irc-raw>", "en": "<irc-raw>"},
-            help_sort=6,
-        ),
     ),
 )

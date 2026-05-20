@@ -25,3 +25,7 @@ bot.pid
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Local optional components
+/plugins/moonface/
+/php/

@@ -82,6 +82,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
   - `url`
   - `randomurl`
   - `unreal`
+  - `immens`
   - `urlsniffer`
 
 ## Example Basic Plugin
@@ -337,22 +338,22 @@ Send these as a private message to the bot, without the normal command prefix:
 - `help roles`
 - `help modes`
 - `help raw`
-- `login <password>`
-- `logout`
-- `whoami`
-- `listroles`
-- `listusers`
-- `roleadd <role> [admin=on] [raw=on]`
-- `roleflag <role> <admin|raw> <on|off>`
-- `adduser <name> <ident@host> <password> [role]`
-- `deluser <ident@host>`
-- `setrole <ident@host> <role>`
-- `rolemode <role> <#channel> <mode>`
-- `rolemode-del <role> <#channel> <mode>`
-- `usermode <ident@host> <#channel> <mode>`
-- `usermode-del <ident@host> <#channel> <mode>`
-- `apply <nick> <#channel> <ident@host>`
-- `raw <IRC RAW LINE>`
+- `login <password>` authenticates your current hostmask for admin commands.
+- `logout` ends the current admin session.
+- `whoami` shows your current admin role and rights.
+- `listroles` lists all stored roles.
+- `listusers` lists all stored admin users.
+- `roleadd <role> [admin=on] [raw=on]` creates a new role.
+- `roleflag <role> <admin|raw> <on|off>` enables or disables one role flag.
+- `adduser <name> <ident@host> <password> [role]` creates an admin user.
+- `deluser <ident@host>` deletes an admin user.
+- `setrole <ident@host> <role>` assigns a different role to a user.
+- `rolemode <role> <#channel> <mode>` allows a channel mode for one role.
+- `rolemode-del <role> <#channel> <mode>` removes a role/channel mode rule.
+- `usermode <ident@host> <#channel> <mode>` adds a user-specific channel mode rule.
+- `usermode-del <ident@host> <#channel> <mode>` removes a user-specific rule.
+- `apply <nick> <#channel> <ident@host>` applies stored mode rules to a nick immediately.
+- `raw <IRC RAW LINE>` sends one raw IRC line directly to the server.
 
 Examples:
 - `login geheim`

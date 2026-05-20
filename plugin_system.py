@@ -24,6 +24,8 @@ class MessageContext:
 
 CommandHandler = Callable[["IRCBot", MessageContext, str], None]
 MessageHandler = Callable[["IRCBot", MessageContext], None]
+TickHandler = Callable[["IRCBot"], None]
+HelpVisibilityHandler = Callable[["IRCBot", MessageContext], bool]
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,8 @@ class CommandSpec:
     aliases: tuple[str, ...] = ()
     primary_names: dict[str, str] = field(default_factory=dict)
     help_args: dict[str, str] = field(default_factory=dict)
+    help_texts: dict[str, str] = field(default_factory=dict)
+    help_visible: HelpVisibilityHandler | None = None
     help_sort: int = 100
 
     def all_aliases(self) -> tuple[str, ...]:
@@ -53,6 +57,9 @@ class CommandSpec:
     def help_arg(self, language: str) -> str:
         return self.help_args.get(language, self.help_args.get("en", "")).strip()
 
+    def help_text(self, language: str) -> str:
+        return self.help_texts.get(language, self.help_texts.get("en", "")).strip()
+
 
 @dataclass(frozen=True)
 class MessageHandlerSpec:
@@ -60,10 +67,17 @@ class MessageHandlerSpec:
 
 
 @dataclass(frozen=True)
+class TickHandlerSpec:
+    handler: TickHandler
+
+
+@dataclass(frozen=True)
 class PluginSpec:
     name: str
+    aliases: tuple[str, ...] = ()
     commands: tuple[CommandSpec, ...] = ()
     message_handlers: tuple[MessageHandlerSpec, ...] = ()
+    tick_handlers: tuple[TickHandlerSpec, ...] = ()
     translations: dict[str, dict[str, str]] = field(default_factory=dict)
     enabled_by_default: bool = True
 
@@ -75,6 +89,7 @@ class PluginManager:
         self._commands_by_canonical: dict[str, CommandSpec] = {}
         self._commands_by_alias: dict[str, CommandSpec] = {}
         self._message_handlers: list[MessageHandler] = []
+        self._tick_handlers: list[TickHandler] = []
         self._loaded_plugins: list[str] = []
         self._translations: dict[str, dict[str, str]] = {}
         self.load_plugins()
@@ -98,16 +113,25 @@ class PluginManager:
     def resolve_command(self, token: str) -> CommandSpec | None:
         return self._commands_by_alias.get(token.strip().lower())
 
-    def build_help_entries(self, prefix: str, language: str) -> tuple[str, ...]:
+    def build_help_entries(self, prefix: str, language: str, context: MessageContext | None = None) -> tuple[str, ...]:
         rendered: list[str] = []
         ordered = sorted(self._commands_by_canonical.values(), key=lambda spec: (spec.help_sort, spec.canonical))
         for spec in ordered:
+            if context is not None and spec.help_visible is not None and not spec.help_visible(self.bot, context):
+                continue
             command_name = spec.primary_name(language)
             help_arg = spec.help_arg(language)
-            rendered.append(f"{prefix}{command_name} {help_arg}".rstrip())
+            help_text = spec.help_text(language)
+            line = f"{prefix}{command_name} {help_arg}".rstrip()
+            if help_text:
+                line = f"{line} - {help_text}"
+            rendered.append(line)
         return tuple(rendered)
 
     def handle_privmsg(self, context: MessageContext) -> None:
+        if not self.bot.public_triggers_enabled():
+            return
+
         for handler in self._message_handlers:
             handler(self.bot, context)
 
@@ -127,10 +151,15 @@ class PluginManager:
 
         command.handler(self.bot, context, arg)
 
+    def handle_tick(self) -> None:
+        for handler in self._tick_handlers:
+            handler(self.bot)
+
     def load_plugins(self) -> None:
         self._commands_by_canonical.clear()
         self._commands_by_alias.clear()
         self._message_handlers.clear()
+        self._tick_handlers.clear()
         self._loaded_plugins.clear()
         self._translations.clear()
 
@@ -153,10 +182,16 @@ class PluginManager:
                 raise TypeError(f"Plugin {plugin_path.parent.name} exportiert kein PluginSpec in PLUGIN.")
 
             plugin_name = plugin.name.strip().lower()
+            plugin_aliases = {
+                alias.strip().lower()
+                for alias in (plugin_path.parent.name, *plugin.aliases)
+                if alias.strip()
+            }
+            plugin_aliases.add(plugin_name)
             if enabled_plugins:
-                is_enabled = plugin_name in enabled_plugins
+                is_enabled = bool(plugin_aliases & enabled_plugins)
             else:
-                is_enabled = plugin.enabled_by_default and plugin_name not in disabled_plugins
+                is_enabled = plugin.enabled_by_default and not (plugin_aliases & disabled_plugins)
 
             if not is_enabled:
                 continue
@@ -165,6 +200,16 @@ class PluginManager:
             self._loaded_plugins.append(plugin_name)
 
     def _register_plugin(self, plugin: PluginSpec) -> None:
+        self._register_translations(plugin)
+        self._register_commands(plugin)
+
+        for message_handler in plugin.message_handlers:
+            self._message_handlers.append(message_handler.handler)
+
+        for tick_handler in plugin.tick_handlers:
+            self._tick_handlers.append(tick_handler.handler)
+
+    def _register_translations(self, plugin: PluginSpec) -> None:
         for language, translations in plugin.translations.items():
             catalog = self._translations.setdefault(language, {})
             for key, value in translations.items():
@@ -173,6 +218,7 @@ class PluginManager:
                     raise ValueError(f"Übersetzungsschlüssel {key} kollidiert in Sprache {language}.")
                 catalog[key] = value
 
+    def _register_commands(self, plugin: PluginSpec) -> None:
         for command in plugin.commands:
             if command.canonical in self._commands_by_canonical:
                 raise ValueError(f"Befehl {command.canonical} wurde mehrfach registriert.")
@@ -183,6 +229,3 @@ class PluginManager:
                 if existing is not None:
                     raise ValueError(f"Alias {alias} kollidiert mit {existing.canonical}.")
                 self._commands_by_alias[alias] = command
-
-        for message_handler in plugin.message_handlers:
-            self._message_handlers.append(message_handler.handler)

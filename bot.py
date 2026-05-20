@@ -7,6 +7,7 @@ import atexit
 import getpass
 import hashlib
 import hmac
+import math
 import os
 import random
 import re
@@ -25,7 +26,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 from plugin_system import MessageContext, PluginManager
@@ -131,6 +132,7 @@ DEFAULT_PREFIX_MODES = {
     "h": "%",
     "v": "+",
 }
+MONDGESICHT_CHANNEL_PLAYER_COUNT_QUERY = "SELECT COUNT(*) AS total_players FROM bot_mondgesicht_scores WHERE network = %s AND channel = %s"
 ADMIN_SESSION_TTL_SECONDS = 1800
 ROLE_FLAG_COLUMNS = {
     "admin": "is_admin",
@@ -138,6 +140,52 @@ ROLE_FLAG_COLUMNS = {
 }
 INVALID_HOSTMASK_MESSAGE = "Ungültige Hostmask."
 ROLE_EXISTS_QUERY = "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1"
+DEFAULT_MONDGESICHT_TEXT_SEED = {
+    "de": {
+        "punkt1": [
+            "{nick} setzt den ersten Punkt.",
+            "Der erste Punkt sitzt: {nick}.",
+            "{nick} setzt den ersten Punkt ins Gesicht.",
+        ],
+        "punkt2": [
+            "{nick} setzt den zweiten Punkt.",
+            "Noch ein Punkt von {nick}.",
+            "{nick} macht das zweite Äuglein fertig.",
+        ],
+        "komma": [
+            "{nick} malt das Komma in das Gesicht.",
+            "Das Komma kommt von {nick}.",
+            "{nick} setzt das Komma schön mittig.",
+        ],
+        "strich": [
+            "Pünktchen, Pünktchen, Komma, Strich: fertig ist das Mondgesicht.",
+            "Mondgesicht komplett in {channel}: {participants} haben {points} Punkte geholt.",
+            "So schön kann ein Mondgesicht sein: {participants} waren daran beteiligt.",
+        ],
+    },
+    "en": {
+        "punkt1": [
+            "{nick} places the first point.",
+            "The first point belongs to {nick}.",
+            "{nick} places the first point on the face.",
+        ],
+        "punkt2": [
+            "{nick} places the second point.",
+            "Another point from {nick}.",
+            "{nick} finishes the second eye.",
+        ],
+        "komma": [
+            "{nick} adds the comma.",
+            "The comma comes from {nick}.",
+            "{nick} places the comma neatly in the middle.",
+        ],
+        "strich": [
+            "Point, point, comma, stroke: the moonface is complete.",
+            "Moonface complete in {channel}: {participants} earned {points} points.",
+            "That moonface looks great: {participants} made it happen.",
+        ],
+    },
+}
 
 
 @dataclass
@@ -167,7 +215,7 @@ class BotConfig:
     language: str = "de"
     flood_burst: int = 4
     flood_window_seconds: float = 2.0
-    flood_min_interval_ms: int = 700
+    flood_min_interval_ms: int = 2000
     nick_protection_enabled: bool = False
     nick_protection_nick: str = ""
     nick_reclaim_interval_seconds: int = 60
@@ -182,6 +230,8 @@ class BotConfig:
     url_max_content_length_bytes: int = 2097152
     enabled_plugins: list[str] | None = None
     disabled_plugins: list[str] | None = None
+    mondgesicht_url_enabled: bool = False
+    mondgesicht_url: str = ""
 
     @staticmethod
     def _from_raw(raw: dict[str, object]) -> "BotConfig":
@@ -236,7 +286,7 @@ class BotConfig:
             language=language,
             flood_burst=max(1, int(raw.get("flood_burst", 4))),
             flood_window_seconds=max(0.1, float(raw.get("flood_window_seconds", 2.0))),
-            flood_min_interval_ms=max(0, int(raw.get("flood_min_interval_ms", 700))),
+            flood_min_interval_ms=max(0, int(raw.get("flood_min_interval_ms", 2000))),
             nick_protection_enabled=bool(raw.get("nick_protection_enabled", False)),
             nick_protection_nick=str(raw.get("nick_protection_nick", nick)).strip(),
             nick_reclaim_interval_seconds=max(5, int(raw.get("nick_reclaim_interval_seconds", 60))),
@@ -251,6 +301,8 @@ class BotConfig:
             url_max_content_length_bytes=max(65536, int(raw.get("url_max_content_length_bytes", 2097152))),
             enabled_plugins=_parse_string_list(raw.get("enabled_plugins", [])),
             disabled_plugins=_parse_string_list(raw.get("disabled_plugins", [])),
+            mondgesicht_url_enabled=bool(raw.get("mondgesicht_url_enabled", False)),
+            mondgesicht_url=str(raw.get("mondgesicht_url", "")).strip(),
         )
 
     @staticmethod
@@ -300,6 +352,7 @@ class IRCBot:
         self.file = None
         self.seen_sniffed_urls: set[str] = set()
         self.channel_modes: dict[str, set[str]] = {}
+        self.channel_members: dict[str, dict[str, str]] = {}
         self.db_initialized = False
         self.cap_negotiation_active = False
         self.sasl_payload_sent = False
@@ -313,11 +366,15 @@ class IRCBot:
         self.last_nick_reclaim_attempt_at: float = 0.0
         self.nickserv_identify_sent = False
         self.startup_actions_completed = False
+        self.public_trigger_activation_at: float = 0.0
         self.server_prefix_modes: dict[str, str] = dict(DEFAULT_PREFIX_MODES)
         self._admin_sessions: dict[str, dict[str, object]] = {}
         self._admin_bootstrap_warned = False
+        self._mondgesicht_channels: list[str] = []
         self._send_lock = threading.RLock()
         self._url_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="urlsniff")
+        self._runtime_stop_event = threading.Event()
+        self._plugin_tick_thread: threading.Thread | None = None
         self.plugin_manager = PluginManager(self, Path(__file__).resolve().parent / "plugins")
 
     def tr(self, key: str, **kwargs) -> str:
@@ -403,6 +460,11 @@ class IRCBot:
         self.nickserv_identify_sent = False
 
     def close(self) -> None:
+        self._runtime_stop_event.set()
+        if self._plugin_tick_thread is not None and self._plugin_tick_thread.is_alive():
+            self._plugin_tick_thread.join(timeout=2)
+        self._plugin_tick_thread = None
+
         if self._url_executor is not None:
             self._url_executor.shutdown(wait=False, cancel_futures=True)
             self._url_executor = None
@@ -418,6 +480,25 @@ class IRCBot:
                 self.sock.close()
         finally:
             self.sock = None
+
+    def start_plugin_tick_loop(self) -> None:
+        if self._plugin_tick_thread is not None and self._plugin_tick_thread.is_alive():
+            return
+
+        self._runtime_stop_event.clear()
+        self._plugin_tick_thread = threading.Thread(
+            target=self.run_plugin_tick_loop,
+            name=f"plugin-tick-{self.config.display_name()}",
+            daemon=True,
+        )
+        self._plugin_tick_thread.start()
+
+    def run_plugin_tick_loop(self) -> None:
+        while not self._runtime_stop_event.wait(5.0):
+            try:
+                self.plugin_manager.handle_tick()
+            except Exception as exc:
+                print(f"[{self.config.display_name()}] Plugin-Tick-Fehler: {exc}")
 
     def setup_oidentd_conf(self) -> None:
         if not self.config.oidentd_conf:
@@ -498,6 +579,7 @@ class IRCBot:
         now = time.monotonic()
 
         # Ensure a minimum delay between chat messages.
+        # This runs inside the shared send lock, so threaded senders are serialized too.
         min_interval = self.config.flood_min_interval_ms / 1000.0
         if min_interval > 0:
             elapsed = now - self._last_chat_send_at
@@ -530,6 +612,12 @@ class IRCBot:
         normalized_channel = channel.strip()
         if normalized_channel:
             self.send_raw(f"MODE {normalized_channel}")
+
+    def request_channel_members(self, channel: str) -> None:
+        normalized_channel = channel.strip()
+        if normalized_channel:
+            self.channel_members[self.normalize_channel_name(normalized_channel)] = {}
+            self.send_raw(f"NAMES {normalized_channel}")
 
     @staticmethod
     def parse_prefix_token(value: str) -> dict[str, str] | None:
@@ -596,6 +684,67 @@ class IRCBot:
     def normalize_channel_name(channel: str) -> str:
         return channel.strip().lower()
 
+    def strip_channel_member_prefixes(self, nick: str) -> str:
+        cleaned = nick.strip()
+        prefixes = set(self.server_prefix_modes.values())
+        while cleaned and cleaned[0] in prefixes:
+            cleaned = cleaned[1:]
+        return cleaned
+
+    def add_channel_member(self, channel: str, nick: str) -> None:
+        normalized_channel = self.normalize_channel_name(channel)
+        cleaned_nick = self.strip_channel_member_prefixes(nick)
+        if not normalized_channel or not cleaned_nick:
+            return
+        members = self.channel_members.setdefault(normalized_channel, {})
+        members[cleaned_nick.lower()] = cleaned_nick
+
+    def add_channel_members(self, channel: str, nicks: Iterable[str]) -> None:
+        for nick in nicks:
+            self.add_channel_member(channel, nick)
+
+    def remove_channel_member(self, channel: str, nick: str) -> None:
+        normalized_channel = self.normalize_channel_name(channel)
+        cleaned_nick = self.strip_channel_member_prefixes(nick)
+        if not normalized_channel or not cleaned_nick:
+            return
+        members = self.channel_members.get(normalized_channel)
+        if members is not None:
+            members.pop(cleaned_nick.lower(), None)
+
+    def rename_channel_member(self, old_nick: str, new_nick: str) -> None:
+        cleaned_old_nick = self.strip_channel_member_prefixes(old_nick)
+        cleaned_new_nick = self.strip_channel_member_prefixes(new_nick)
+        if not cleaned_old_nick or not cleaned_new_nick:
+            return
+        lowered_old_nick = cleaned_old_nick.lower()
+        lowered_new_nick = cleaned_new_nick.lower()
+        for members in self.channel_members.values():
+            if lowered_old_nick in members:
+                members.pop(lowered_old_nick, None)
+                members[lowered_new_nick] = cleaned_new_nick
+
+    def remove_channel_member_from_all(self, nick: str) -> None:
+        cleaned_nick = self.strip_channel_member_prefixes(nick)
+        if not cleaned_nick:
+            return
+        lowered_nick = cleaned_nick.lower()
+        for members in self.channel_members.values():
+            members.pop(lowered_nick, None)
+
+    def get_channel_member_nicks(self, channel: str) -> tuple[str, ...]:
+        normalized_channel = self.normalize_channel_name(channel)
+        members = self.channel_members.get(normalized_channel, {})
+        return tuple(members.values())
+
+    def is_nick_in_channel(self, channel: str, nick: str) -> bool:
+        normalized_channel = self.normalize_channel_name(channel)
+        cleaned_nick = self.strip_channel_member_prefixes(nick)
+        if not normalized_channel or not cleaned_nick:
+            return False
+        members = self.channel_members.get(normalized_channel, {})
+        return cleaned_nick.lower() in members
+
     def user_mask_from_parts(self, ident: str, host: str) -> str | None:
         if not ident or not host:
             return None
@@ -652,6 +801,7 @@ class IRCBot:
         if normalized_channel and normalized_channel not in self.config.channels:
             self.config.channels.append(normalized_channel)
         if normalized_channel:
+            self.channel_members.setdefault(self.normalize_channel_name(normalized_channel), {})
             self.store_channel_if_missing(normalized_channel)
 
     def forget_channel(self, channel: str) -> None:
@@ -661,6 +811,7 @@ class IRCBot:
 
         self.config.channels = [ch for ch in self.config.channels if ch.lower() != normalized_channel.lower()]
         self.channel_modes.pop(normalized_channel, None)
+        self.channel_members.pop(self.normalize_channel_name(normalized_channel), None)
         self.delete_saved_channel(normalized_channel)
 
     def merge_saved_channels(self) -> None:
@@ -711,7 +862,11 @@ class IRCBot:
         self.join_channels(self.config.channels)
         for channel in self.config.channels:
             self.request_channel_modes(channel)
+        self.public_trigger_activation_at = time.monotonic() + 60.0
         self.startup_actions_completed = True
+
+    def public_triggers_enabled(self) -> bool:
+        return time.monotonic() >= self.public_trigger_activation_at
 
     def try_reclaim_preferred_nick(self, force: bool = False) -> None:
         if not self.config.nick_protection_enabled:
@@ -739,8 +894,8 @@ class IRCBot:
         command = self.plugin_manager.resolve_command(token)
         return command.canonical if command is not None else None
 
-    def build_help_entries(self, prefix: str) -> tuple[str, ...]:
-        return self.plugin_manager.build_help_entries(prefix, self.config.language)
+    def build_help_entries(self, prefix: str, context=None) -> tuple[str, ...]:
+        return self.plugin_manager.build_help_entries(prefix, self.config.language, context)
 
     def send_lag_probe(self, reply_target: str) -> None:
         token = f"lag-{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
@@ -867,6 +1022,8 @@ class IRCBot:
 
         self.ensure_database_setup()
         self.merge_saved_channels()
+        self._mondgesicht_channels = self.load_saved_mondgesicht_channels()
+        self.start_plugin_tick_loop()
 
         for line in self.file:
             line = line.rstrip("\r\n")
@@ -921,15 +1078,18 @@ class IRCBot:
                     self.current_nick = new_nick
                     if new_nick.lower() == self.preferred_nick.lower():
                         self.last_nick_reclaim_attempt_at = 0.0
+                self.rename_channel_member(changed_nick, new_nick)
                 self.update_admin_session_nick(changed_nick, new_nick)
                 continue
 
             if command == "JOIN" and len(params) >= 1:
                 joined_channel = params[0].lstrip(":")
                 joined_nick, joined_ident, joined_host = self.split_hostmask(prefix)
+                self.add_channel_member(joined_channel, joined_nick)
                 if joined_nick.lower() == self.current_nick.lower() and joined_channel:
                     self.remember_channel(joined_channel)
                     self.request_channel_modes(joined_channel)
+                    self.request_channel_members(joined_channel)
                 elif joined_channel:
                     self.apply_configured_channel_modes(joined_channel, joined_nick, joined_ident, joined_host)
                 continue
@@ -937,6 +1097,7 @@ class IRCBot:
             if command == "PART" and len(params) >= 1:
                 parted_channel = params[0].lstrip(":")
                 parted_nick = prefix.split("!", 1)[0] if prefix else ""
+                self.remove_channel_member(parted_channel, parted_nick)
                 if parted_nick.lower() == self.current_nick.lower() and parted_channel:
                     self.forget_channel(parted_channel)
                 continue
@@ -944,8 +1105,14 @@ class IRCBot:
             if command == "KICK" and len(params) >= 2:
                 kicked_channel = params[0].lstrip(":")
                 kicked_nick = params[1]
+                self.remove_channel_member(kicked_channel, kicked_nick)
                 if kicked_nick.lower() == self.current_nick.lower() and kicked_channel:
                     self.forget_channel(kicked_channel)
+                continue
+
+            if command == "QUIT":
+                quit_nick = prefix.split("!", 1)[0] if prefix else ""
+                self.remove_channel_member_from_all(quit_nick)
                 continue
 
             if command == "433":
@@ -974,11 +1141,17 @@ class IRCBot:
                     self.remember_channel(invited_channel)
                     self.send_raw(f"JOIN {invited_channel}")
                     self.request_channel_modes(invited_channel)
+                    self.request_channel_members(invited_channel)
                     if inviter_nick:
                         self.send_action(
                             invited_channel,
                             f"slaps {inviter_nick} around a bit with a large {self.current_nick}",
                         )
+                continue
+
+            if command == "353" and len(params) >= 4:
+                names_channel = params[2]
+                self.add_channel_members(names_channel, params[3].lstrip(":").split())
                 continue
 
             if command == "324" and len(params) >= 3:
@@ -1538,6 +1711,1510 @@ class IRCBot:
         finally:
             conn.close()
 
+    def mondgesicht_channels(self) -> tuple[str, ...]:
+        channels = []
+        seen: set[str] = set()
+        for channel in self._mondgesicht_channels:
+            normalized = channel.strip()
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            channels.append(normalized)
+        return tuple(channels)
+
+    @staticmethod
+    def _normalize_unique_nicks(values: list[str] | None) -> tuple[str, ...]:
+        normalized_values: list[str] = []
+        seen: set[str] = set()
+        for value in values or []:
+            nick = str(value).strip()
+            lowered = nick.lower()
+            if not lowered or lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized_values.append(nick)
+        return tuple(normalized_values)
+
+    @staticmethod
+    def _normalize_mondgesicht_access_type(access_type: str) -> str:
+        normalized = access_type.strip().lower()
+        return normalized if normalized in {"god", "ignore"} else ""
+
+    def get_mondgesicht_channel_access_nicks(self, channel: str, access_type: str) -> tuple[str, ...]:
+        normalized_channel = channel.strip()
+        normalized_type = self._normalize_mondgesicht_access_type(access_type)
+        if not normalized_channel or not normalized_type:
+            return ()
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return ()
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT nick
+                    FROM bot_mondgesicht_channel_access
+                    WHERE network = %s AND channel = %s AND access_type = %s
+                    ORDER BY nick ASC
+                    """,
+                    (self.config.network_key, normalized_channel, normalized_type),
+                )
+                rows = cur.fetchall() or []
+            entries = [str(row.get("nick", "")).strip() for row in rows]
+            return self._normalize_unique_nicks(entries)
+        except Exception:
+            return ()
+        finally:
+            conn.close()
+
+    def add_mondgesicht_channel_access_nick(self, channel: str, nick: str, access_type: str, created_by: str) -> str:
+        normalized_channel = channel.strip()
+        normalized_nick = nick.strip()
+        normalized_type = self._normalize_mondgesicht_access_type(access_type)
+        if not normalized_channel or normalized_channel[0] not in {"#", "&", "+", "!"}:
+            return "invalid_channel"
+        if not normalized_nick:
+            return "invalid_nick"
+        if not normalized_type:
+            return "invalid_access_type"
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return "db_unavailable"
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT IGNORE INTO bot_mondgesicht_channel_access (network, channel, access_type, nick, created_at, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (self.config.network_key, normalized_channel, normalized_type, normalized_nick, self.current_time_string(), created_by),
+                )
+                return "added" if cur.rowcount > 0 else "exists"
+        except Exception:
+            return "db_unavailable"
+        finally:
+            conn.close()
+
+    def delete_mondgesicht_channel_access_nick(self, channel: str, nick: str, access_type: str) -> str:
+        normalized_channel = channel.strip()
+        normalized_nick = nick.strip()
+        normalized_type = self._normalize_mondgesicht_access_type(access_type)
+        if not normalized_channel or normalized_channel[0] not in {"#", "&", "+", "!"}:
+            return "invalid_channel"
+        if not normalized_nick:
+            return "invalid_nick"
+        if not normalized_type:
+            return "invalid_access_type"
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return "db_unavailable"
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM bot_mondgesicht_channel_access
+                    WHERE network = %s AND channel = %s AND access_type = %s AND nick = %s
+                    """,
+                    (self.config.network_key, normalized_channel, normalized_type, normalized_nick),
+                )
+                return "deleted" if cur.rowcount > 0 else "missing"
+        except Exception:
+            return "db_unavailable"
+        finally:
+            conn.close()
+
+    def mondgesicht_gods_for_channel(self, channel: str) -> tuple[str, ...]:
+        return self.get_mondgesicht_channel_access_nicks(channel, "god")
+
+    def mondgesicht_ignore_for_channel(self, channel: str) -> tuple[str, ...]:
+        return self.get_mondgesicht_channel_access_nicks(channel, "ignore")
+
+    def is_mondgesicht_god_for_channel(self, channel: str, nick: str) -> bool:
+        lowered = nick.strip().lower()
+        if not lowered:
+            return False
+
+        ignored = {entry.lower() for entry in self.mondgesicht_ignore_for_channel(channel)}
+        if lowered in ignored:
+            return False
+
+        gods = self.mondgesicht_gods_for_channel(channel)
+        if not gods:
+            return True
+
+        return lowered in {entry.lower() for entry in gods}
+
+    def add_mondgesicht_channel(self, channel: str) -> str:
+        normalized_channel = channel.strip()
+        if not normalized_channel or normalized_channel[0] not in {"#", "&", "+", "!"}:
+            return "invalid"
+
+        existing = {item.lower() for item in self.mondgesicht_channels()}
+        if normalized_channel.lower() in existing:
+            return "exists"
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return "db_unavailable"
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT IGNORE INTO bot_mondgesicht_channels (network, channel, created_at) VALUES (%s, %s, %s)",
+                    (self.config.network_key, normalized_channel, self.current_time_string()),
+                )
+        except Exception:
+            return "db_unavailable"
+        finally:
+            conn.close()
+
+        self._mondgesicht_channels.append(normalized_channel)
+        return "added"
+
+    def delete_mondgesicht_channel(self, channel: str) -> str:
+        normalized_channel = channel.strip()
+        if not normalized_channel or normalized_channel[0] not in {"#", "&", "+", "!"}:
+            return "invalid"
+
+        existing = {item.lower() for item in self.mondgesicht_channels()}
+        if normalized_channel.lower() not in existing:
+            return "missing"
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return "db_unavailable"
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM bot_mondgesicht_channels WHERE network = %s AND channel = %s",
+                    (self.config.network_key, normalized_channel),
+                )
+        except Exception:
+            return "db_unavailable"
+        finally:
+            conn.close()
+
+        self._mondgesicht_channels = [item for item in self._mondgesicht_channels if item.lower() != normalized_channel.lower()]
+        return "deleted"
+
+    def record_mondgesicht_add(self, channel: str, nick: str, category: str, text: str) -> str | None:
+        if pymysql is None:
+            return self.tr("mg_db_missing_pkg")
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return self.tr("mg_db_unavailable")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO bot_mondgesicht_adds (network, channel, nick, category, entry_text, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (self.config.network_key, channel, nick, category, text, self.current_time_string()),
+                )
+        except Exception:
+            return self.tr("mg_add_store_failed")
+        finally:
+            conn.close()
+
+        return None
+
+    def add_mondgesicht_points(self, channel: str, nick: str, points: int) -> bool:
+        if points == 0 or pymysql is None:
+            return False
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO bot_mondgesicht_scores (network, channel, nick, points, updated_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        points = GREATEST(0, points + VALUES(points)),
+                        updated_at = VALUES(updated_at)
+                    """,
+                    (self.config.network_key, channel, nick, points, self.current_time_string()),
+                )
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+        return True
+
+    def unique_mondgesicht_participants(self, participants: list[str], *, preserve_case: bool = True) -> list[str]:
+        unique_participants: list[str] = []
+        seen: set[str] = set()
+        for nick in participants:
+            normalized_nick = nick.strip()
+            lowered = normalized_nick.lower()
+            if not lowered or lowered in seen:
+                continue
+            seen.add(lowered)
+            unique_participants.append(normalized_nick if preserve_case else lowered)
+        return unique_participants
+
+    def update_mondgesicht_repetition_streaks(
+        self,
+        unresolved: set[str],
+        streak_rounds: dict[str, int],
+        round_nicks: set[str],
+    ) -> None:
+        for lowered in tuple(unresolved):
+            if lowered in round_nicks:
+                streak_rounds[lowered] += 1
+                continue
+            unresolved.remove(lowered)
+
+    def iter_mondgesicht_round_nick_sets(self, conn, channel: str) -> Iterable[set[str]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT nick,
+                       CASE WHEN round_token <> '' THEN round_token ELSE CONCAT('legacy:', created_at) END AS round_key
+                FROM bot_mondgesicht_round_awards
+                WHERE network = %s AND channel = %s
+                ORDER BY id DESC
+                """,
+                (self.config.network_key, channel),
+            )
+            current_round_key = None
+            current_round_nicks: set[str] = set()
+            for row in cur.fetchall() or []:
+                round_key = str(row.get("round_key", "")).strip()
+                lowered = str(row.get("nick", "")).strip().lower()
+                if not round_key or not lowered:
+                    continue
+                if current_round_key is None:
+                    current_round_key = round_key
+                if round_key != current_round_key:
+                    yield current_round_nicks
+                    current_round_key = round_key
+                    current_round_nicks = set()
+                current_round_nicks.add(lowered)
+
+            if current_round_key is not None:
+                yield current_round_nicks
+
+    def normalize_mondgesicht_award_participants(self, participants: list[str]) -> dict[str, dict[str, object]]:
+        normalized_participants: dict[str, dict[str, object]] = {}
+        for raw_nick in participants:
+            nick = raw_nick.strip()
+            if not nick:
+                continue
+            lowered = nick.lower()
+            if lowered not in normalized_participants:
+                normalized_participants[lowered] = {"nick": nick, "slots": 0}
+            normalized_participants[lowered]["slots"] = int(normalized_participants[lowered]["slots"]) + 1
+        return normalized_participants
+
+    def get_mondgesicht_repetition_counts(
+        self,
+        channel: str,
+        participants: list[str],
+        *,
+        conn=None,
+    ) -> dict[str, int]:
+        if pymysql is None or not participants:
+            return {}
+
+        unique_participants = self.unique_mondgesicht_participants(participants, preserve_case=False)
+        if not unique_participants:
+            return {}
+
+        owns_connection = conn is None
+        if owns_connection:
+            conn = self.open_db_connection()
+        if conn is None:
+            return {}
+
+        streak_rounds = dict.fromkeys(unique_participants, 0)
+        unresolved = set(unique_participants)
+
+        try:
+            for round_nicks in self.iter_mondgesicht_round_nick_sets(conn, channel):
+                self.update_mondgesicht_repetition_streaks(unresolved, streak_rounds, round_nicks)
+                if not unresolved:
+                    break
+        except Exception:
+            return {}
+        finally:
+            if owns_connection:
+                conn.close()
+
+        return {
+            lowered: max(0, streak_length)
+            for lowered, streak_length in streak_rounds.items()
+        }
+
+    def get_mondgesicht_player_summaries(self, channel: str, participants: list[str]) -> dict[str, dict[str, int]]:
+        if pymysql is None or not participants:
+            return {}
+
+        unique_participants = self.unique_mondgesicht_participants(participants)
+        if not unique_participants:
+            return {}
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(unique_participants))
+        summaries = {
+            nick.lower(): {"current_points": 0, "repetitions": 0}
+            for nick in unique_participants
+        }
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT nick, points
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel = %s AND nick IN ({placeholders})
+                    """,
+                    (self.config.network_key, channel, *unique_participants),
+                )
+                for row in cur.fetchall() or []:
+                    nick = str(row.get("nick", "")).strip().lower()
+                    if nick in summaries:
+                        summaries[nick]["current_points"] = int(row.get("points", 0))
+
+                repeat_counts = self.get_mondgesicht_repetition_counts(channel, unique_participants, conn=conn)
+                for nick, repetitions in repeat_counts.items():
+                    if nick in summaries:
+                        summaries[nick]["repetitions"] = repetitions
+        except Exception:
+            return {}
+        finally:
+            conn.close()
+
+        return summaries
+
+    def award_mondgesicht_round_points(self, channel: str, participants: list[str], points: int, round_token: str) -> dict[str, object] | None:
+        if points == 0 or pymysql is None or not participants:
+            return None
+
+        normalized_participants = self.normalize_mondgesicht_award_participants(participants)
+        if not normalized_participants:
+            return None
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return None
+
+        summaries: dict[str, dict[str, int]] = {}
+        created_at = self.current_time_string()
+        try:
+            with conn.cursor() as cur:
+                for lowered, participant_info in normalized_participants.items():
+                    nick = str(participant_info["nick"])
+                    awarded_points = points * int(participant_info["slots"])
+                    cur.execute(
+                        """
+                        SELECT points
+                        FROM bot_mondgesicht_scores
+                        WHERE network = %s AND channel = %s AND nick = %s
+                        LIMIT 1
+                        """,
+                        (self.config.network_key, channel, nick),
+                    )
+                    row = cur.fetchone() or {}
+                    previous_points = int(row.get("points", 0))
+
+                    cur.execute(
+                        """
+                        INSERT INTO bot_mondgesicht_scores (network, channel, nick, points, updated_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            points = GREATEST(0, points + VALUES(points)),
+                            updated_at = VALUES(updated_at)
+                        """,
+                        (self.config.network_key, channel, nick, awarded_points, created_at),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO bot_mondgesicht_round_awards (network, channel, nick, round_token, points_awarded, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (self.config.network_key, channel, nick, round_token, awarded_points, created_at),
+                    )
+                    summaries[lowered] = {
+                        "previous_points": previous_points,
+                        "current_points": max(0, previous_points + awarded_points),
+                        "repetitions": 0,
+                    }
+
+                repeat_counts = self.get_mondgesicht_repetition_counts(
+                    channel,
+                    [str(info["nick"]) for info in normalized_participants.values()],
+                    conn=conn,
+                )
+                for lowered, repetitions in repeat_counts.items():
+                    if lowered in summaries:
+                        summaries[lowered]["repetitions"] = repetitions
+
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT CASE WHEN round_token <> '' THEN round_token ELSE created_at END) AS round_count
+                    FROM bot_mondgesicht_round_awards
+                    WHERE network = %s AND channel = %s
+                    """,
+                    (self.config.network_key, channel),
+                )
+                round_row = cur.fetchone() or {}
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+        return {
+            "players": summaries,
+            "round_count": int(round_row.get("round_count", 0)),
+        }
+
+    def add_mondgesicht_text(self, language: str, category: str, text: str, created_by: str) -> bool:
+        if pymysql is None:
+            return False
+
+        normalized_language = language.strip().lower()
+        normalized_category = category.strip().lower()
+        normalized_text = text.strip()
+        normalized_created_by = created_by.strip()
+        if normalized_language not in {"de", "en"} or not normalized_category or not normalized_text:
+            return False
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO bot_mondgesicht_texts (network, language, category, entry_text, created_at, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        self.config.network_key,
+                        normalized_language,
+                        normalized_category,
+                        normalized_text,
+                        self.current_time_string(),
+                        normalized_created_by,
+                    ),
+                )
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+        return True
+
+    def replace_mondgesicht_texts(self, entries: list[tuple[str, str, str]], created_by: str) -> bool:
+        if pymysql is None:
+            return False
+        if not entries:
+            return False
+
+        normalized_created_by = created_by.strip()
+        prepared_entries: list[tuple[str, str, str, str, str, str]] = []
+        for language, category, text in entries:
+            normalized_language = language.strip().lower()
+            normalized_category = category.strip().lower()
+            normalized_text = text.strip()
+            if normalized_language not in {"de", "en"} or not normalized_category or not normalized_text:
+                return False
+            prepared_entries.append(
+                (
+                    self.config.network_key,
+                    normalized_language,
+                    normalized_category,
+                    normalized_text,
+                    self.current_time_string(),
+                    normalized_created_by,
+                )
+            )
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM bot_mondgesicht_texts WHERE network = %s", (self.config.network_key,))
+                cur.executemany(
+                    """
+                    INSERT INTO bot_mondgesicht_texts (network, language, category, entry_text, created_at, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    prepared_entries,
+                )
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+        return True
+
+    @staticmethod
+    def parse_mondgesicht_text_seed_language(
+        raw: object,
+        language: str,
+    ) -> list[tuple[str, str, str]] | None:
+        if not isinstance(raw, dict):
+            return None
+
+        entries: list[tuple[str, str, str]] = []
+        language_values = raw.get(language)
+        if not isinstance(language_values, dict):
+            return None
+        for category in ("punkt1", "punkt2", "komma", "strich"):
+            category_values = language_values.get(category)
+            if not isinstance(category_values, list):
+                return None
+            for value in category_values:
+                text = str(value).strip()
+                if text:
+                    entries.append((language, category, text))
+        return entries
+
+    @classmethod
+    def parse_mondgesicht_text_seed(cls, raw: object) -> list[tuple[str, str, str]] | None:
+        de_entries = cls.parse_mondgesicht_text_seed_language(raw, "de")
+        if de_entries is None:
+            return None
+        en_entries = cls.parse_mondgesicht_text_seed_language(raw, "en")
+        if en_entries is None:
+            return None
+        entries = [*de_entries, *en_entries]
+        return entries or None
+
+    def default_mondgesicht_text_seed_entries(self) -> list[tuple[str, str, str]] | None:
+        return self.parse_mondgesicht_text_seed(DEFAULT_MONDGESICHT_TEXT_SEED)
+
+    def seed_default_mondgesicht_texts(self, created_by: str, *, replace_existing: bool = False) -> tuple[bool, int]:
+        entries = self.default_mondgesicht_text_seed_entries()
+        if not entries:
+            return False, 0
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, 0
+
+        has_existing_entries = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bot_mondgesicht_texts WHERE network = %s LIMIT 1",
+                    (self.config.network_key,),
+                )
+                has_existing_entries = cur.fetchone() is not None
+        except Exception:
+            return False, 0
+        finally:
+            conn.close()
+
+        if has_existing_entries and not replace_existing:
+            return True, 0
+        if not self.replace_mondgesicht_texts(entries, created_by):
+            return False, 0
+        return True, len(entries)
+
+    def format_mondgesicht_url(self, **kwargs: object) -> str | None:
+        if not self.config.mondgesicht_url_enabled:
+            return None
+
+        template = self.config.mondgesicht_url.strip()
+        if not template:
+            return None
+
+        format_values: dict[str, object] = dict(kwargs)
+        for key, value in kwargs.items():
+            format_values[f"{key}_url"] = quote_plus(str(value))
+
+        try:
+            rendered = template.format(**format_values).strip()
+        except Exception:
+            return None
+        return rendered or None
+
+    def delete_mondgesicht_text(self, text_id: int) -> bool:
+        if pymysql is None:
+            return False
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM bot_mondgesicht_texts WHERE network = %s AND id = %s",
+                    (self.config.network_key, text_id),
+                )
+                return cur.rowcount > 0
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+    def list_mondgesicht_texts(self, language: str, category: str = "", limit: int = 20) -> tuple[dict[str, object], ...]:
+        if pymysql is None:
+            return ()
+
+        normalized_language = language.strip().lower()
+        normalized_category = category.strip().lower()
+        if normalized_language not in {"de", "en"}:
+            return ()
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return ()
+
+        safe_limit = max(1, min(limit, 50))
+        try:
+            with conn.cursor() as cur:
+                if normalized_category:
+                    cur.execute(
+                        """
+                        SELECT id, language, category, entry_text, created_at, created_by
+                        FROM bot_mondgesicht_texts
+                        WHERE network = %s AND language = %s AND category = %s
+                        ORDER BY id DESC
+                        LIMIT %s
+                        """,
+                        (self.config.network_key, normalized_language, normalized_category, safe_limit),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, language, category, entry_text, created_at, created_by
+                        FROM bot_mondgesicht_texts
+                        WHERE network = %s AND language = %s
+                        ORDER BY id DESC
+                        LIMIT %s
+                        """,
+                        (self.config.network_key, normalized_language, safe_limit),
+                    )
+                rows = cur.fetchall() or []
+        except Exception:
+            return ()
+        finally:
+            conn.close()
+
+        return tuple(rows)
+
+    def get_random_mondgesicht_text(self, language: str, category: str) -> str | None:
+        if pymysql is None:
+            return None
+
+        normalized_language = language.strip().lower()
+        normalized_category = category.strip().lower()
+        if normalized_language not in {"de", "en"} or not normalized_category:
+            return None
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return None
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT entry_text
+                    FROM bot_mondgesicht_texts
+                    WHERE network = %s AND language = %s AND category = %s
+                    ORDER BY RAND()
+                    LIMIT 1
+                    """,
+                    (self.config.network_key, normalized_language, normalized_category),
+                )
+                row = cur.fetchone()
+                if row:
+                    return str(row.get("entry_text", "")).strip() or None
+
+                if normalized_language != "de":
+                    cur.execute(
+                        """
+                        SELECT entry_text
+                        FROM bot_mondgesicht_texts
+                        WHERE network = %s AND language = 'de' AND category = %s
+                        ORDER BY RAND()
+                        LIMIT 1
+                        """,
+                        (self.config.network_key, normalized_category),
+                    )
+                    fallback_row = cur.fetchone()
+                    if fallback_row:
+                        return str(fallback_row.get("entry_text", "")).strip() or None
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+        return None
+
+    def get_mondgesicht_top_text(self, channel: str, limit: int = 10) -> str:
+        if pymysql is None:
+            return self.tr("mg_db_missing_pkg")
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return self.tr("mg_db_unavailable")
+
+        safe_limit = max(1, min(limit, 50))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT nick, points
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel = %s
+                    ORDER BY points DESC, nick ASC
+                    LIMIT %s
+                    """,
+                    (self.config.network_key, channel, safe_limit),
+                )
+                rows = cur.fetchall()
+        except Exception:
+            return self.tr("mg_db_unavailable")
+        finally:
+            conn.close()
+
+        if not rows:
+            return self.tr("mg_top_empty", channel=channel)
+
+        items = [
+            self.tr("mg_top_entry", index=index, nick=str(row.get("nick", "?")), points=self.format_points(int(row.get("points", 0))))
+            for index, row in enumerate(rows, start=1)
+        ]
+        return self.tr("mg_top_channel", channel=channel, items=" | ".join(items))
+
+    def get_mondgesicht_global_top_text(self, limit: int = 10) -> str:
+        channels = self.mondgesicht_channels()
+        if not channels:
+            return self.tr("mg_no_channels")
+        if pymysql is None:
+            return self.tr("mg_db_missing_pkg")
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return self.tr("mg_db_unavailable")
+
+        safe_limit = max(1, min(limit, 50))
+        placeholders = ", ".join(["%s"] * len(channels))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT nick, SUM(points) AS points
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel IN ({placeholders})
+                    GROUP BY nick
+                    ORDER BY points DESC, nick ASC
+                    LIMIT %s
+                    """,
+                    (self.config.network_key, *channels, safe_limit),
+                )
+                rows = cur.fetchall()
+        except Exception:
+            return self.tr("mg_db_unavailable")
+        finally:
+            conn.close()
+
+        if not rows:
+            return self.tr("mg_global_top_empty")
+
+        items = [
+            self.tr("mg_top_entry", index=index, nick=str(row.get("nick", "?")), points=self.format_points(int(row.get("points", 0))))
+            for index, row in enumerate(rows, start=1)
+        ]
+        return self.tr("mg_global_top", items=" | ".join(items))
+
+    def get_mondgesicht_stats_text(self, channel: str, nick: str) -> str:
+        if pymysql is None:
+            return self.tr("mg_db_missing_pkg")
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return self.tr("mg_db_unavailable")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT points
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel = %s AND nick = %s
+                    LIMIT 1
+                    """,
+                    (self.config.network_key, channel, nick),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return self.tr("mg_stats_empty", nick=nick, scope=channel)
+
+                points = int(row.get("points", 0))
+                cur.execute(
+                    MONDGESICHT_CHANNEL_PLAYER_COUNT_QUERY,
+                    (self.config.network_key, channel),
+                )
+                total_row = cur.fetchone() or {}
+                total_players = int(total_row.get("total_players", 0))
+                cur.execute(
+                    """
+                    SELECT COUNT(*) + 1 AS rank_pos
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel = %s AND points > %s
+                    """,
+                    (self.config.network_key, channel, points),
+                )
+                rank_row = cur.fetchone() or {}
+                rank = int(rank_row.get("rank_pos", 1))
+        except Exception:
+            return self.tr("mg_db_unavailable")
+        finally:
+            conn.close()
+
+        return self.tr(
+            "mg_stats",
+            nick=nick,
+            points=self.format_points(points),
+            rank=rank,
+            total=total_players,
+            scope=channel,
+        )
+
+    def get_mondgesicht_global_stats_text(self, nick: str) -> str:
+        channels = self.mondgesicht_channels()
+        if not channels:
+            return self.tr("mg_no_channels")
+        if pymysql is None:
+            return self.tr("mg_db_missing_pkg")
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return self.tr("mg_db_unavailable")
+
+        placeholders = ", ".join(["%s"] * len(channels))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT nick, SUM(points) AS points
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel IN ({placeholders})
+                    GROUP BY nick
+                    ORDER BY points DESC, nick ASC
+                    """,
+                    (self.config.network_key, *channels),
+                )
+                rows = cur.fetchall()
+        except Exception:
+            return self.tr("mg_db_unavailable")
+        finally:
+            conn.close()
+
+        if not rows:
+            return self.tr("mg_global_stats_empty", nick=nick)
+
+        lowered_nick = nick.lower()
+        for index, row in enumerate(rows, start=1):
+            row_nick = str(row.get("nick", ""))
+            if row_nick.lower() != lowered_nick:
+                continue
+            return self.tr(
+                "mg_global_stats",
+                nick=row_nick,
+                points=self.format_points(int(row.get("points", 0))),
+                rank=index,
+                total=len(rows),
+            )
+
+        return self.tr("mg_global_stats_empty", nick=nick)
+
+    @staticmethod
+    def mondgesicht_repeat_bonus_value(repetitions: int, player_count: int) -> int:
+        if repetitions < 5 or repetitions % 5 != 0:
+            return 0
+
+        steps = repetitions // 5
+        if player_count < 7:
+            factor = 10
+        elif player_count > 100:
+            factor = 6
+        elif player_count > 80:
+            factor = 5
+        elif player_count > 60:
+            factor = 4
+        elif player_count > 40:
+            factor = 3
+        elif player_count > 20:
+            factor = 2
+        else:
+            factor = 1
+        return factor * steps
+
+    def get_mondgesicht_channel_player_count(self, channel: str) -> int:
+        if pymysql is None:
+            return 0
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return 0
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    MONDGESICHT_CHANNEL_PLAYER_COUNT_QUERY,
+                    (self.config.network_key, channel),
+                )
+                row = cur.fetchone() or {}
+                return int(row.get("total_players", 0))
+        except Exception:
+            return 0
+        finally:
+            conn.close()
+
+    def get_mondgesicht_channel_points(self, channel: str, nick: str) -> int:
+        if pymysql is None:
+            return 0
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return 0
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT points
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel = %s AND nick = %s
+                    LIMIT 1
+                    """,
+                    (self.config.network_key, channel, nick),
+                )
+                row = cur.fetchone() or {}
+        except Exception:
+            return 0
+        finally:
+            conn.close()
+
+        return int(row.get("points", 0))
+
+    def get_mondgesicht_channel_leader(self, channel: str) -> dict[str, object] | None:
+        if pymysql is None:
+            return None
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return None
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT nick, points
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel = %s
+                    ORDER BY points DESC, nick ASC
+                    LIMIT 1
+                    """,
+                    (self.config.network_key, channel),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "nick": str(row.get("nick", "")).strip(),
+                    "points": int(row.get("points", 0)),
+                }
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+    def get_mondgesicht_jackpot_state(self, channel: str) -> dict[str, object]:
+        if pymysql is None:
+            return {"jackpot_points": 0, "last_awarded_points": 0, "last_awarded_to": ""}
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return {"jackpot_points": 0, "last_awarded_points": 0, "last_awarded_to": ""}
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT jackpot_points, last_awarded_points, last_awarded_to
+                    FROM bot_mondgesicht_jackpot
+                    WHERE network = %s AND channel = %s
+                    LIMIT 1
+                    """,
+                    (self.config.network_key, channel),
+                )
+                row = cur.fetchone() or {}
+        except Exception:
+            return {"jackpot_points": 0, "last_awarded_points": 0, "last_awarded_to": ""}
+        finally:
+            conn.close()
+
+        return {
+            "jackpot_points": int(row.get("jackpot_points", 0)),
+            "last_awarded_points": int(row.get("last_awarded_points", 0)),
+            "last_awarded_to": str(row.get("last_awarded_to", "")).strip(),
+        }
+
+    def store_mondgesicht_jackpot_state(self, channel: str, jackpot_points: int, last_awarded_points: int, last_awarded_to: str) -> bool:
+        if pymysql is None:
+            return False
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO bot_mondgesicht_jackpot (network, channel, jackpot_points, last_awarded_points, last_awarded_to, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        jackpot_points = VALUES(jackpot_points),
+                        last_awarded_points = VALUES(last_awarded_points),
+                        last_awarded_to = VALUES(last_awarded_to),
+                        updated_at = VALUES(updated_at)
+                    """,
+                    (
+                        self.config.network_key,
+                        channel,
+                        max(0, int(jackpot_points)),
+                        max(0, int(last_awarded_points)),
+                        last_awarded_to.strip(),
+                        self.current_time_string(),
+                    ),
+                )
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+        return True
+
+    def apply_mondgesicht_point_changes(self, channel: str, point_changes: dict[str, int]) -> dict[str, int] | None:
+        if pymysql is None:
+            return None
+
+        normalized_changes: dict[str, dict[str, object]] = {}
+        for raw_nick, raw_delta in point_changes.items():
+            nick = raw_nick.strip()
+            delta = int(raw_delta)
+            if not nick or delta == 0:
+                continue
+            lowered = nick.lower()
+            if lowered not in normalized_changes:
+                normalized_changes[lowered] = {"nick": nick, "delta": 0}
+            normalized_changes[lowered]["delta"] = int(normalized_changes[lowered]["delta"]) + delta
+
+        if not normalized_changes:
+            return {}
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return None
+
+        try:
+            with conn.cursor() as cur:
+                for payload in normalized_changes.values():
+                    cur.execute(
+                        """
+                        INSERT INTO bot_mondgesicht_scores (network, channel, nick, points, updated_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            points = GREATEST(0, points + VALUES(points)),
+                            updated_at = VALUES(updated_at)
+                        """,
+                        (
+                            self.config.network_key,
+                            channel,
+                            str(payload["nick"]),
+                            int(payload["delta"]),
+                            self.current_time_string(),
+                        ),
+                    )
+
+                placeholders = ", ".join(["%s"] * len(normalized_changes))
+                cur.execute(
+                    f"""
+                    SELECT nick, points
+                    FROM bot_mondgesicht_scores
+                    WHERE network = %s AND channel = %s AND nick IN ({placeholders})
+                    """,
+                    (self.config.network_key, channel, *(str(payload["nick"]) for payload in normalized_changes.values())),
+                )
+                rows = cur.fetchall() or []
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+        return {str(row.get("nick", "")).strip().lower(): int(row.get("points", 0)) for row in rows}
+
+    def format_mondgesicht_last_jackpot(self, last_points: int, last_nick: str) -> str:
+        if last_points <= 0 or not last_nick.strip():
+            return ""
+        return self.tr("mg_status_last_jackpot", points=self.format_points(last_points), nick=last_nick)
+
+    def format_mondgesicht_jackpot_details(
+        self,
+        minimum_points: int,
+        maximum_points: int,
+        awarded: bool,
+        reason: str = "",
+    ) -> str:
+        reason_text = ""
+        if not awarded and reason.strip():
+            reason_text = self.tr("mg_jackpot_reason", reason=reason.strip())
+        return self.tr(
+            "mg_jackpot_details",
+            minimum=self.format_points(minimum_points),
+            maximum=self.format_points(maximum_points),
+            awarded=self.tr("mg_jackpot_awarded_yes" if awarded else "mg_jackpot_awarded_no"),
+            reason=reason_text,
+        )
+
+    @staticmethod
+    def build_mondgesicht_slot_context(slot_participants: list[str]) -> tuple[list[str], dict[str, int], dict[str, str]]:
+        distinct_participants: list[str] = []
+        seen_participants: set[str] = set()
+        slot_counts: dict[str, int] = {}
+        display_names: dict[str, str] = {}
+
+        for nick in slot_participants:
+            cleaned = nick.strip()
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            display_names[lowered] = cleaned
+            slot_counts[lowered] = slot_counts.get(lowered, 0) + 1
+            if lowered in seen_participants:
+                continue
+            seen_participants.add(lowered)
+            distinct_participants.append(cleaned)
+
+        return distinct_participants, slot_counts, display_names
+
+    def collect_mondgesicht_repeat_and_day_bonuses(
+        self,
+        channel: str,
+        round_count: int,
+        distinct_participants: list[str],
+        slot_counts: dict[str, int],
+        player_summaries: dict[str, dict[str, int]],
+    ) -> tuple[dict[str, int], list[str]]:
+        bonus_changes: dict[str, int] = {}
+        bonus_labels: list[str] = []
+        player_count = max(1, self.get_mondgesicht_channel_player_count(channel))
+
+        for nick in distinct_participants:
+            lowered = nick.lower()
+            repetitions = int(player_summaries.get(lowered, {}).get("repetitions", 0))
+            repeat_bonus = self.mondgesicht_repeat_bonus_value(repetitions, player_count)
+            if repeat_bonus <= 0:
+                continue
+            bonus_changes[lowered] = bonus_changes.get(lowered, 0) + (repeat_bonus * slot_counts.get(lowered, 1))
+            bonus_labels.append(self.tr("mg_bonus_repeat_summary"))
+
+        day_of_year = max(1, time.localtime().tm_yday)
+        if round_count > 0 and day_of_year % round_count == 0:
+            for lowered, slots in slot_counts.items():
+                bonus_changes[lowered] = bonus_changes.get(lowered, 0) + (5 * slots)
+            bonus_labels.append(self.tr("mg_bonus_day_summary"))
+
+        if str(round_count).endswith(f"{day_of_year:03d}"):
+            for lowered, slots in slot_counts.items():
+                bonus_changes[lowered] = bonus_changes.get(lowered, 0) + (day_of_year * slots)
+            bonus_labels.append(self.tr("mg_bonus_day_big_summary"))
+
+        return bonus_changes, bonus_labels
+
+    def collect_mondgesicht_leader_bonus(
+        self,
+        channel: str,
+        distinct_participants: list[str],
+    ) -> tuple[dict[str, int], dict[str, str], list[str]]:
+        leader = self.get_mondgesicht_channel_leader(channel)
+        if leader is None:
+            return {}, {}, []
+
+        leader_nick = str(leader.get("nick", "")).strip()
+        leader_points = int(leader.get("points", 0))
+        distinct_participant_keys = {nick.lower() for nick in distinct_participants}
+        if not leader_nick or leader_points <= 0 or leader_nick.lower() in distinct_participant_keys:
+            return {}, {}, []
+
+        total_loss = max(1, len(distinct_participants))
+        bonus_changes = {leader_nick.lower(): -total_loss}
+        display_names = {leader_nick.lower(): leader_nick}
+        for nick in distinct_participants:
+            cleaned = nick.strip()
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            bonus_changes[lowered] = bonus_changes.get(lowered, 0) + 1
+            display_names[lowered] = cleaned
+        return bonus_changes, display_names, [self.tr("mg_bonus_leader_summary", nick=leader_nick, points=self.format_points(total_loss))]
+
+    def resolve_mondgesicht_jackpot(
+        self,
+        channel: str,
+        distinct_participants: list[str],
+        slot_participants: list[str],
+        player_summaries: dict[str, dict[str, int]],
+        bonus_changes: dict[str, int],
+    ) -> tuple[dict[str, int], str]:
+        day_of_year = max(1, time.localtime().tm_yday)
+        jackpot_state = self.get_mondgesicht_jackpot_state(channel)
+        minimum_jackpot = day_of_year
+        jackpot_points = max(int(jackpot_state.get("jackpot_points", 0)), day_of_year)
+        jackpot_points += max(1, len(slot_participants))
+        last_awarded_points = int(jackpot_state.get("last_awarded_points", 0))
+        last_awarded_to = str(jackpot_state.get("last_awarded_to", "")).strip()
+        max_jackpot = max(day_of_year, int(500 * day_of_year / 183))
+        jackpot_points = min(jackpot_points, max_jackpot)
+        minimum_jackpot = min(minimum_jackpot, max_jackpot)
+        jackpot_awarded = False
+        jackpot_reason = ""
+        jackpot_message = self.tr(
+            "mg_jackpot_pending",
+            jackpot=self.format_points(jackpot_points),
+            last_jackpot=self.format_mondgesicht_last_jackpot(last_awarded_points, last_awarded_to),
+        )
+
+        if jackpot_points >= day_of_year:
+            candidate_pool: list[str] = ["-ALL"]
+            seen_candidates = {"-all"}
+            for nick in self.get_channel_member_nicks(channel):
+                lowered_nick = nick.lower()
+                if lowered_nick not in seen_candidates:
+                    candidate_pool.append(nick)
+                    seen_candidates.add(lowered_nick)
+            if self.current_nick.lower() not in seen_candidates:
+                candidate_pool.append(self.current_nick)
+            candidate = random.choice(candidate_pool)
+            if candidate == "-ALL" and distinct_participants:
+                eligible_participants: list[str] = []
+                missing_participants: list[str] = []
+                low_point_participants: list[str] = []
+                for nick in distinct_participants:
+                    if not self.is_nick_in_channel(channel, nick):
+                        missing_participants.append(nick)
+                        continue
+                    lowered = nick.lower()
+                    candidate_points = int(player_summaries.get(lowered, {}).get("current_points", 0))
+                    if lowered not in player_summaries:
+                        candidate_points = self.get_mondgesicht_channel_points(channel, nick)
+                    candidate_points += bonus_changes.get(lowered, 0)
+                    if candidate_points <= 100:
+                        low_point_participants.append(f"{nick} ({self.format_points(candidate_points)})")
+                        continue
+                    eligible_participants.append(nick)
+
+                if len(eligible_participants) == len(distinct_participants):
+                    share = max(1, jackpot_points // max(1, len(eligible_participants)))
+                    for nick in eligible_participants:
+                        lowered = nick.lower()
+                        bonus_changes[lowered] = bonus_changes.get(lowered, 0) + share
+                    last_awarded_points = jackpot_points
+                    last_awarded_to = ", ".join(eligible_participants)
+                    jackpot_awarded = True
+                    jackpot_message = self.tr("mg_jackpot_split", points=self.format_points(jackpot_points), nicks=", ".join(eligible_participants))
+                    jackpot_points = 0
+                elif missing_participants:
+                    jackpot_reason = self.tr(
+                        "mg_jackpot_not_awarded_split_not_in_channel",
+                        nicks=", ".join(missing_participants),
+                    )
+                else:
+                    jackpot_reason = self.tr(
+                        "mg_jackpot_not_awarded_split_points",
+                        nicks=", ".join(low_point_participants),
+                    )
+            elif candidate == "-ALL":
+                jackpot_reason = self.tr("mg_jackpot_not_awarded_no_participants")
+            elif candidate.lower() == self.current_nick.lower():
+                jackpot_points = min(max_jackpot, max(jackpot_points + 1, int(round(jackpot_points * random.uniform(1.0, 2.0)))))
+                jackpot_message = self.tr("mg_jackpot_rolled", jackpot=self.format_points(jackpot_points))
+            elif self.is_nick_in_channel(channel, candidate):
+                lowered_candidate = candidate.lower()
+                candidate_points = int(player_summaries.get(lowered_candidate, {}).get("current_points", 0))
+                if lowered_candidate not in player_summaries:
+                    candidate_points = self.get_mondgesicht_channel_points(channel, candidate)
+                candidate_points += bonus_changes.get(lowered_candidate, 0)
+                if candidate_points > 100:
+                    bonus_changes[lowered_candidate] = bonus_changes.get(lowered_candidate, 0) + jackpot_points
+                    last_awarded_points = jackpot_points
+                    last_awarded_to = candidate
+                    jackpot_awarded = True
+                    jackpot_message = self.tr("mg_jackpot_awarded", nick=candidate, points=self.format_points(jackpot_points))
+                    jackpot_points = 0
+                else:
+                    jackpot_reason = self.tr(
+                        "mg_jackpot_not_awarded_points",
+                        nick=candidate,
+                        points=self.format_points(candidate_points),
+                    )
+            else:
+                jackpot_reason = self.tr("mg_jackpot_not_awarded_not_in_channel", nick=candidate)
+
+        jackpot_message = "{} {}".format(
+            jackpot_message,
+            self.format_mondgesicht_jackpot_details(minimum_jackpot, max_jackpot, jackpot_awarded, jackpot_reason),
+        ).strip()
+
+        self.store_mondgesicht_jackpot_state(channel, jackpot_points, last_awarded_points, last_awarded_to)
+        return bonus_changes, jackpot_message
+
+    def process_mondgesicht_round_extras(
+        self,
+        channel: str,
+        participants: list[str],
+        slot_participants: list[str],
+        round_count: int,
+        player_summaries: dict[str, dict[str, int]],
+    ) -> dict[str, object]:
+        if not participants:
+            return {"players": player_summaries, "messages": ()}
+
+        distinct_participants, slot_counts, display_names = self.build_mondgesicht_slot_context(slot_participants)
+        bonus_changes, bonus_labels = self.collect_mondgesicht_repeat_and_day_bonuses(
+            channel,
+            round_count,
+            distinct_participants,
+            slot_counts,
+            player_summaries,
+        )
+        leader_changes, leader_display_names, leader_labels = self.collect_mondgesicht_leader_bonus(
+            channel,
+            distinct_participants,
+        )
+        display_names.update(leader_display_names)
+        for lowered, delta in leader_changes.items():
+            bonus_changes[lowered] = bonus_changes.get(lowered, 0) + delta
+        bonus_labels.extend(leader_labels)
+        bonus_changes, jackpot_message = self.resolve_mondgesicht_jackpot(
+            channel,
+            distinct_participants,
+            slot_participants,
+            player_summaries,
+            bonus_changes,
+        )
+
+        updated_points = self.apply_mondgesicht_point_changes(
+            channel,
+            {display_names.get(lowered, lowered): delta for lowered, delta in bonus_changes.items()},
+        )
+        if updated_points is not None:
+            for nick in participants:
+                lowered = nick.lower()
+                if lowered in updated_points and lowered in player_summaries:
+                    player_summaries[lowered]["current_points"] = updated_points[lowered]
+
+        messages: list[str] = []
+        if bonus_labels:
+            messages.append(self.tr("mg_round_extras", details=", ".join(dict.fromkeys(bonus_labels))))
+        if jackpot_message:
+            messages.append(jackpot_message)
+
+        return {"players": player_summaries, "messages": tuple(messages)}
+
+    def get_mondgesicht_status_text(self, channel: str) -> str:
+        if pymysql is None:
+            return self.tr("mg_db_missing_pkg")
+
+        channels = self.mondgesicht_channels()
+        placeholders = ", ".join(["%s"] * len(channels)) if channels else ""
+        conn = self.open_db_connection()
+        if conn is None:
+            return self.tr("mg_db_unavailable")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    MONDGESICHT_CHANNEL_PLAYER_COUNT_QUERY,
+                    (self.config.network_key, channel),
+                )
+                current_row = cur.fetchone() or {}
+                players_current = int(current_row.get("total_players", 0))
+
+                if channels:
+                    cur.execute(
+                        f"""
+                        SELECT COUNT(DISTINCT nick) AS total_players
+                        FROM bot_mondgesicht_scores
+                        WHERE network = %s AND channel IN ({placeholders})
+                        """,
+                        (self.config.network_key, *channels),
+                    )
+                    global_row = cur.fetchone() or {}
+                    players_global = int(global_row.get("total_players", 0))
+                else:
+                    players_global = players_current
+
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT CASE WHEN round_token <> '' THEN round_token ELSE created_at END) AS round_count
+                    FROM bot_mondgesicht_round_awards
+                    WHERE network = %s AND channel = %s
+                    """,
+                    (self.config.network_key, channel),
+                )
+                round_row = cur.fetchone() or {}
+                round_count = int(round_row.get("round_count", 0))
+        except Exception:
+            return self.tr("mg_db_unavailable")
+        finally:
+            conn.close()
+
+        leader = self.get_mondgesicht_channel_leader(channel)
+        leader_text = self.tr("mg_status_no_leader") if leader is None else self.tr(
+            "mg_status_leader",
+            nick=str(leader.get("nick", "?")),
+            points=self.format_points(int(leader.get("points", 0))),
+        )
+        jackpot_state = self.get_mondgesicht_jackpot_state(channel)
+        last_jackpot = self.format_mondgesicht_last_jackpot(
+            int(jackpot_state.get("last_awarded_points", 0)),
+            str(jackpot_state.get("last_awarded_to", "")),
+        )
+        return self.tr(
+            "mg_status",
+            channel=channel,
+            players_current=players_current,
+            players_global=players_global,
+            round_count=self.format_points(round_count),
+            leader=leader_text,
+            jackpot=self.format_points(int(jackpot_state.get("jackpot_points", 0))),
+            last_jackpot=last_jackpot,
+        )
+
     def get_my_dart_stats_text(self, nick: str) -> str:
         if pymysql is None:
             return self.tr("dart_stats_missing_pkg")
@@ -1903,6 +3580,10 @@ class IRCBot:
         return row
 
     def build_cached_url_result(self, row: dict[str, str | int | bool | None]) -> dict[str, str | int | bool | None] | None:
+        url = str(row.get("url", ""))
+        if self.is_youtube_url(url):
+            return None
+
         topic_value = row.get("topic")
         topic = str(topic_value).strip() if topic_value is not None else ""
         if not topic:
@@ -1911,7 +3592,7 @@ class IRCBot:
         return {
             "status": "ok",
             "id": self.safe_int(row.get("id")),
-            "url": str(row.get("url", "")),
+            "url": url,
             "topic": topic,
             "title_missing": bool(int(row.get("title_missing", 0) or 0)),
         }
@@ -2188,6 +3869,30 @@ class IRCBot:
                 )
                 cur.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_channels (
+                        network VARCHAR(255) NOT NULL,
+                        channel VARCHAR(128) NOT NULL,
+                        created_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (network, channel)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_channel_access (
+                        network VARCHAR(255) NOT NULL,
+                        channel VARCHAR(128) NOT NULL,
+                        access_type VARCHAR(16) NOT NULL,
+                        nick VARCHAR(64) NOT NULL,
+                        created_at VARCHAR(32) NOT NULL,
+                        created_by VARCHAR(255) NOT NULL DEFAULT '',
+                        PRIMARY KEY (network, channel, access_type, nick),
+                        KEY idx_bot_mondgesicht_channel_access_lookup (network, channel, access_type)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS bot_admin_roles (
                         network VARCHAR(255) NOT NULL,
                         role_name VARCHAR(64) NOT NULL,
@@ -2238,6 +3943,85 @@ class IRCBot:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_scores (
+                        network VARCHAR(255) NOT NULL,
+                        channel VARCHAR(128) NOT NULL,
+                        nick VARCHAR(64) NOT NULL,
+                        points INT NOT NULL DEFAULT 0,
+                        updated_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (network, channel, nick),
+                        KEY idx_bot_mondgesicht_scores_rank (network, channel, points)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_jackpot (
+                        network VARCHAR(255) NOT NULL,
+                        channel VARCHAR(128) NOT NULL,
+                        jackpot_points INT NOT NULL DEFAULT 0,
+                        last_awarded_points INT NOT NULL DEFAULT 0,
+                        last_awarded_to VARCHAR(255) NOT NULL DEFAULT '',
+                        updated_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (network, channel)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_round_awards (
+                        id BIGINT NOT NULL AUTO_INCREMENT,
+                        network VARCHAR(255) NOT NULL,
+                        channel VARCHAR(128) NOT NULL,
+                        nick VARCHAR(64) NOT NULL,
+                        round_token VARCHAR(64) NOT NULL DEFAULT '',
+                        points_awarded INT NOT NULL,
+                        created_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (id),
+                        KEY idx_bot_mondgesicht_round_awards_lookup (network, channel, nick, created_at),
+                        KEY idx_bot_mondgesicht_round_awards_token (network, channel, round_token)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                self.ensure_mondgesicht_round_awards_schema(cur)
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_adds (
+                        id BIGINT NOT NULL AUTO_INCREMENT,
+                        network VARCHAR(255) NOT NULL,
+                        channel VARCHAR(128) NOT NULL,
+                        nick VARCHAR(64) NOT NULL,
+                        category VARCHAR(32) NOT NULL,
+                        entry_text TEXT NOT NULL,
+                        created_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (id),
+                        KEY idx_bot_mondgesicht_adds_lookup (network, channel, category, created_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_texts (
+                        id BIGINT NOT NULL AUTO_INCREMENT,
+                        network VARCHAR(255) NOT NULL,
+                        language VARCHAR(8) NOT NULL,
+                        category VARCHAR(32) NOT NULL,
+                        entry_text TEXT NOT NULL,
+                        created_at VARCHAR(32) NOT NULL,
+                        created_by VARCHAR(255) NOT NULL DEFAULT '',
+                        PRIMARY KEY (id),
+                        KEY idx_bot_mondgesicht_texts_lookup (network, language, category, id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                self.ensure_mondgesicht_text_storage_utf8mb4(cur)
+                seeded, seeded_count = self.seed_default_mondgesicht_texts("system", replace_existing=False)
+                if not seeded:
+                    print(f"Mondgesicht seed skipped for {self.config.network_key}.")
+                elif seeded_count > 0:
+                    print(f"Seeded {seeded_count} Mondgesicht texts for {self.config.network_key}.")
             self.db_initialized = True
         except Exception as exc:
             print(self.tr("db_table_setup_failed", error=exc))
@@ -2303,6 +4087,42 @@ class IRCBot:
             pass
         finally:
             conn.close()
+
+    def load_saved_mondgesicht_channels(self) -> list[str]:
+        conn = self.open_db_connection()
+        if conn is None:
+            return []
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT channel FROM bot_mondgesicht_channels WHERE network = %s ORDER BY channel ASC",
+                    (self.config.network_key,),
+                )
+                rows = cur.fetchall() or []
+            return [str(row.get("channel", "")).strip() for row in rows if str(row.get("channel", "")).strip()]
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    def ensure_mondgesicht_text_storage_utf8mb4(self, cur) -> None:
+        db_name = self.config.mysql_database.replace("`", "``")
+        cur.execute(f"ALTER DATABASE `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        cur.execute("ALTER TABLE bot_mondgesicht_jackpot CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        cur.execute("ALTER TABLE bot_mondgesicht_round_awards CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        cur.execute("ALTER TABLE bot_mondgesicht_adds CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        cur.execute("ALTER TABLE bot_mondgesicht_texts CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+
+    def ensure_mondgesicht_round_awards_schema(self, cur) -> None:
+        try:
+            cur.execute("ALTER TABLE bot_mondgesicht_round_awards ADD COLUMN round_token VARCHAR(64) NOT NULL DEFAULT '' AFTER nick")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE bot_mondgesicht_round_awards ADD KEY idx_bot_mondgesicht_round_awards_token (network, channel, round_token)")
+        except Exception:
+            pass
 
     @staticmethod
     def hash_admin_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
