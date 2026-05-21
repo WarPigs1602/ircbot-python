@@ -682,6 +682,11 @@ class IRCBot:
             cleaned = cleaned[1:]
         return cleaned
 
+    def normalize_channel_member_nick(self, nick: str) -> str:
+        cleaned = self.strip_channel_member_prefixes(nick)
+        member_nick, _, _ = self.split_hostmask(cleaned)
+        return member_nick.strip()
+
     def parse_names_member_hostmask(self, value: str) -> tuple[str, str, str]:
         cleaned = self.strip_channel_member_prefixes(value)
         nick, ident, host = self.split_hostmask(cleaned)
@@ -689,7 +694,7 @@ class IRCBot:
 
     def add_channel_member(self, channel: str, nick: str) -> None:
         normalized_channel = self.normalize_channel_name(channel)
-        cleaned_nick = self.strip_channel_member_prefixes(nick)
+        cleaned_nick = self.normalize_channel_member_nick(nick)
         if not normalized_channel or not cleaned_nick:
             return
         self.clear_member_mode_retry(normalized_channel, cleaned_nick)
@@ -702,7 +707,7 @@ class IRCBot:
 
     def remove_channel_member(self, channel: str, nick: str) -> None:
         normalized_channel = self.normalize_channel_name(channel)
-        cleaned_nick = self.strip_channel_member_prefixes(nick)
+        cleaned_nick = self.normalize_channel_member_nick(nick)
         if not normalized_channel or not cleaned_nick:
             return
         self.clear_member_mode_retry(normalized_channel, cleaned_nick)
@@ -711,8 +716,8 @@ class IRCBot:
             members.pop(cleaned_nick.lower(), None)
 
     def rename_channel_member(self, old_nick: str, new_nick: str) -> None:
-        cleaned_old_nick = self.strip_channel_member_prefixes(old_nick)
-        cleaned_new_nick = self.strip_channel_member_prefixes(new_nick)
+        cleaned_old_nick = self.normalize_channel_member_nick(old_nick)
+        cleaned_new_nick = self.normalize_channel_member_nick(new_nick)
         if not cleaned_old_nick or not cleaned_new_nick:
             return
         for channel in tuple(self.channel_members):
@@ -725,7 +730,7 @@ class IRCBot:
                 members[lowered_new_nick] = cleaned_new_nick
 
     def remove_channel_member_from_all(self, nick: str) -> None:
-        cleaned_nick = self.strip_channel_member_prefixes(nick)
+        cleaned_nick = self.normalize_channel_member_nick(nick)
         if not cleaned_nick:
             return
         for channel in tuple(self.channel_members):
@@ -741,7 +746,7 @@ class IRCBot:
 
     def is_nick_in_channel(self, channel: str, nick: str) -> bool:
         normalized_channel = self.normalize_channel_name(channel)
-        cleaned_nick = self.strip_channel_member_prefixes(nick)
+        cleaned_nick = self.normalize_channel_member_nick(nick)
         if not normalized_channel or not cleaned_nick:
             return False
         members = self.channel_members.get(normalized_channel, {})
@@ -824,7 +829,7 @@ class IRCBot:
 
     def clear_member_mode_retry(self, channel: str, nick: str, mode: str = "") -> None:
         normalized_channel = self.normalize_channel_name(channel)
-        cleaned_nick = self.strip_channel_member_prefixes(nick).lower()
+        cleaned_nick = self.normalize_channel_member_nick(nick).lower()
         if not normalized_channel or not cleaned_nick:
             return
         for key in tuple(self._member_mode_retry_at):
@@ -837,7 +842,7 @@ class IRCBot:
 
     def should_retry_member_mode(self, channel: str, nick: str, mode: str, cooldown_seconds: float) -> bool:
         normalized_channel = self.normalize_channel_name(channel)
-        cleaned_nick = self.strip_channel_member_prefixes(nick).lower()
+        cleaned_nick = self.normalize_channel_member_nick(nick).lower()
         if not normalized_channel or not cleaned_nick or not mode:
             return False
         key = (normalized_channel, cleaned_nick, mode)
