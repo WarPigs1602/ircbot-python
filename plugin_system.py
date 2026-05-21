@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -154,6 +155,12 @@ class PluginManager:
     def handle_tick(self) -> None:
         for handler in self._tick_handlers:
             handler(self.bot)
+
+    def reload_plugins(self) -> None:
+        """Entlädt alle Plugin-Module aus sys.modules und lädt sie erneut."""
+        for key in [k for k in sys.modules if k.startswith("ircbot_plugin_")]:
+            del sys.modules[key]
+        self.load_plugins()
 
     def load_plugins(self) -> None:
         self._commands_by_canonical.clear()
