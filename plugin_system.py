@@ -156,8 +156,20 @@ class PluginManager:
         for handler in self._tick_handlers:
             handler(self.bot)
 
+    def _reset_plugin_runtime_state(self) -> None:
+        # Clear plugin-specific in-memory state so reload starts clean.
+        for attr_name in (
+            "_mondgesicht_channels",
+            "_moonface_round_states",
+            "_moonface_start_locks",
+            "_moonface_auto_start_deadlines",
+        ):
+            if hasattr(self.bot, attr_name):
+                delattr(self.bot, attr_name)
+
     def reload_plugins(self) -> None:
         """Entlädt alle Plugin-Module aus sys.modules und lädt sie erneut."""
+        self._reset_plugin_runtime_state()
         for key in [k for k in sys.modules if k.startswith("ircbot_plugin_")]:
             del sys.modules[key]
         self.load_plugins()
