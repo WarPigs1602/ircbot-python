@@ -326,6 +326,8 @@ class IRCBot:
         self.startup_actions_completed = False
         self.public_trigger_activation_at: float = 0.0
         self.server_prefix_modes: dict[str, str] = dict(DEFAULT_PREFIX_MODES)
+        self.userhost_in_names_enabled = False
+        self.active_capabilities: set[str] = set()
         self._admin_sessions: dict[str, dict[str, object]] = {}
         self._admin_bootstrap_warned = False
         self._send_lock = threading.RLock()
@@ -571,14 +573,14 @@ class IRCBot:
         self._last_chat_send_at = now
 
     def join_channels(self, channels: Iterable[str]) -> None:
-        for ch in channels:
-            if ch:
-                self.send_raw(f"JOIN {ch}")
+        normalized = [ch.strip() for ch in channels if ch and ch.strip()]
+        if not normalized:
+            return
+        self.send_raw(f"JOIN {','.join(normalized)}")
 
     def request_channel_modes(self, channel: str) -> None:
-        normalized_channel = channel.strip()
-        if normalized_channel:
-            self.send_raw(f"MODE {normalized_channel}")
+        # Intentionally disabled: no explicit MODE/TOPIC polling on join/startup.
+        return
 
     def request_user_modes(self) -> None:
         if self.current_nick:
@@ -602,6 +604,8 @@ class IRCBot:
             time.sleep(2.0)
 
     def request_channel_who(self, channel: str) -> None:
+        if self.userhost_in_names_enabled:
+            return
         normalized_channel = channel.strip()
         if normalized_channel:
             self._who_queue.put(normalized_channel)
@@ -677,6 +681,11 @@ class IRCBot:
         while cleaned and cleaned[0] in prefixes:
             cleaned = cleaned[1:]
         return cleaned
+
+    def parse_names_member_hostmask(self, value: str) -> tuple[str, str, str]:
+        cleaned = self.strip_channel_member_prefixes(value)
+        nick, ident, host = self.split_hostmask(cleaned)
+        return nick.strip(), ident.strip(), host.strip()
 
     def add_channel_member(self, channel: str, nick: str) -> None:
         normalized_channel = self.normalize_channel_name(channel)
@@ -907,9 +916,7 @@ class IRCBot:
         self.run_perform_commands()
         self.request_user_modes()
         self.join_channels(self.config.channels)
-        for channel in self.config.channels:
-            self.request_channel_modes(channel)
-        if self.config.flood_protection_enabled:
+        if self.config.flood_protection_enabled and not self.userhost_in_names_enabled:
             self.public_trigger_activation_at = time.monotonic() + 60.0
         else:
             self.public_trigger_activation_at = 0.0
@@ -1009,22 +1016,54 @@ class IRCBot:
             self.send_raw("CAP END")
             self.cap_negotiation_active = False
 
+    @staticmethod
+    def _extract_cap_list_param(params: list[str]) -> str:
+        if len(params) >= 4 and params[2] == "*":
+            return params[3]
+        if len(params) >= 3:
+            return params[2]
+        return ""
+
+    @staticmethod
+    def _parse_cap_tokens(caps_text: str) -> set[str]:
+        parsed: set[str] = set()
+        for token in caps_text.split():
+            normalized = token.strip().lower().lstrip(":")
+            if not normalized:
+                continue
+            if normalized[0] in {"+", "-", "~", "="}:
+                normalized = normalized[1:]
+            if not normalized:
+                continue
+            parsed.add(normalized.split("=", 1)[0])
+        return parsed
+
     def handle_cap_message(self, params: list[str]) -> None:
         if len(params) < 2:
             return
 
         subcommand = params[1].upper()
-        caps_text = params[2].lstrip(":") if len(params) >= 3 else ""
-        cap_tokens = {token.split("=", 1)[0].lower() for token in caps_text.split()}
+        caps_text = self._extract_cap_list_param(params)
+        cap_tokens = self._parse_cap_tokens(caps_text)
 
         if subcommand == "LS":
+            requested_caps: list[str] = []
             if self.should_use_sasl() and "sasl" in cap_tokens:
-                self.send_raw("CAP REQ :sasl")
+                requested_caps.append("sasl")
+            if "userhost-in-names" in cap_tokens:
+                requested_caps.append("userhost-in-names")
+            if requested_caps:
+                self.send_raw(f"CAP REQ :{' '.join(requested_caps)}")
                 return
             self.end_cap_negotiation()
             return
 
         if subcommand == "ACK":
+            self.active_capabilities.update(cap_tokens)
+            if "userhost-in-names" in cap_tokens:
+                self.userhost_in_names_enabled = True
+                if self.startup_actions_completed:
+                    self.public_trigger_activation_at = 0.0
             if self.should_use_sasl() and "sasl" in cap_tokens:
                 self.send_raw("AUTHENTICATE PLAIN")
                 return
@@ -1032,6 +1071,10 @@ class IRCBot:
             return
 
         if subcommand in {"NAK", "DEL"}:
+            if subcommand == "DEL":
+                self.active_capabilities.difference_update(cap_tokens)
+            if "userhost-in-names" in cap_tokens:
+                self.userhost_in_names_enabled = False
             self.end_cap_negotiation()
 
     def send_sasl_plain_payload(self) -> None:
@@ -1137,7 +1180,8 @@ class IRCBot:
                 self.add_channel_member(joined_channel, joined_nick)
                 if joined_nick.lower() == self.current_nick.lower() and joined_channel:
                     self.remember_channel(joined_channel)
-                    self.request_channel_modes(joined_channel)
+                    if not self.userhost_in_names_enabled:
+                        self.request_channel_modes(joined_channel)
                     self.request_channel_members(joined_channel)
                     self.request_channel_who(joined_channel)
                 elif joined_channel:
@@ -1190,7 +1234,8 @@ class IRCBot:
                 if invited_nick.lower() == self.current_nick.lower():
                     self.remember_channel(invited_channel)
                     self.send_raw(f"JOIN {invited_channel}")
-                    self.request_channel_modes(invited_channel)
+                    if not self.userhost_in_names_enabled:
+                        self.request_channel_modes(invited_channel)
                     self.request_channel_members(invited_channel)
                     if inviter_nick:
                         self.send_action(
@@ -1201,7 +1246,13 @@ class IRCBot:
 
             if command == "353" and len(params) >= 4:
                 names_channel = params[2]
-                self.add_channel_members(names_channel, params[3].lstrip(":").split())
+                names_members = params[3].lstrip(":").split()
+                self.add_channel_members(names_channel, names_members)
+                if self.userhost_in_names_enabled:
+                    for member in names_members:
+                        member_nick, member_ident, member_host = self.parse_names_member_hostmask(member)
+                        if member_nick and member_ident and member_host:
+                            self.apply_configured_channel_modes(names_channel, member_nick, member_ident, member_host)
                 continue
 
             if command == "324" and len(params) >= 3:

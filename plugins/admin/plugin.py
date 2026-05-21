@@ -34,9 +34,12 @@ MESSAGES = {
         "admin_help_mg_11": "mgignore-del <#channel> <nick> entfernt einen Mondgesicht-Ignore-Nick channelspezifisch.",
         "admin_help_raw_1": "raw <IRC-RAW-Zeile> sendet eine IRC-Zeile direkt an den Server.",
         "admin_help_raw_2": "Beispiel: raw MODE #chan +o Nick",
+        "admin_help_caps": "caps zeigt die aktuell aktivierten IRC-Capabilities.",
         "admin_help_reload": "reloadplugins lädt alle Plugins dynamisch neu.",
         "admin_reload_ok": "Plugins wurden neu geladen.",
         "admin_reload_failed": "Plugins konnten nicht neu geladen werden: {error}",
+        "admin_caps_none": "Keine IRC-Capabilities aktiviert.",
+        "admin_caps_enabled": "Aktive IRC-Capabilities: {caps}",
         "admin_pm_only": "Administrative Befehle nur per privater Nachricht an den Bot.",
         "admin_prefix_forbidden": "Administrative Befehle im PM bitte ohne Prefix senden.",
         "admin_hostmask_missing": "Deine Hostmask ist unvollständig. Bitte mit ident@host verbinden.",
@@ -91,9 +94,12 @@ MESSAGES = {
         "admin_help_mg_11": "mgignore-del <#channel> <nick> removes one channel-specific Moonface ignore nick.",
         "admin_help_raw_1": "raw <IRC raw line> sends one IRC line directly to the server.",
         "admin_help_raw_2": "Example: raw MODE #chan +o Nick",
+        "admin_help_caps": "caps shows the currently active IRC capabilities.",
         "admin_help_reload": "reloadplugins dynamically reloads all plugins.",
         "admin_reload_ok": "Plugins reloaded.",
         "admin_reload_failed": "Failed to reload plugins: {error}",
+        "admin_caps_none": "No IRC capabilities active.",
+        "admin_caps_enabled": "Active IRC capabilities: {caps}",
         "admin_pm_only": "Administrative commands only work in private messages to the bot.",
         "admin_prefix_forbidden": "Send administrative PM commands without the prefix.",
         "admin_hostmask_missing": "Your hostmask is incomplete. Please connect with ident@host.",
@@ -130,6 +136,7 @@ def admin_help_topics(bot) -> str:
     if has_mg_admin_help(bot):
         topics.append("mg")
     topics.append("raw")
+    topics.append("cap")
     topics.append("reload")
     return "|".join(topics)
 
@@ -175,6 +182,7 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
             "admin_help_modes_5",
             "admin_help_raw_1",
             "admin_help_raw_2",
+            "admin_help_caps",
             "admin_help_reload",
         ),
         "auth": ("admin_help_auth_1", "admin_help_auth_2", "admin_help_auth_3"),
@@ -188,6 +196,7 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
             "admin_help_modes_5",
         ),
         "raw": ("admin_help_raw_1", "admin_help_raw_2"),
+        "cap": ("admin_help_caps",),
         "reload": ("admin_help_reload",),
     }
     if has_mg_admin_help(bot):
@@ -232,6 +241,8 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
 
     if normalized_topic in {"mondgesicht", "moonface"}:
         normalized_topic = "mg"
+    if normalized_topic in {"cap", "caps", "capability", "capabilities"}:
+        normalized_topic = "cap"
     if normalized_topic in {"reload", "reloadplugins"}:
         normalized_topic = "reload"
 
@@ -339,6 +350,7 @@ def is_prefixed_admin_message(context) -> bool:
         "usermode-del",
         "apply",
         "raw",
+        "caps",
         "reloadplugins",
     }
 
@@ -377,6 +389,7 @@ def parse_pm_admin_message(message: str) -> tuple[str, str] | None:
         "usermode-del",
         "apply",
         "raw",
+        "caps",
         "reloadplugins",
     }:
         return command, rest
@@ -569,6 +582,14 @@ def handle_admin_authenticated(bot, context, parts: list[str], source_mask: str,
 
     if subcommand == "listusers":
         reply(bot, context, render_users(bot))
+        return True
+
+    if subcommand == "caps":
+        active_caps = sorted(str(cap).strip() for cap in getattr(bot, "active_capabilities", set()) if str(cap).strip())
+        if active_caps:
+            reply(bot, context, bot.tr("admin_caps_enabled", caps=", ".join(active_caps)))
+        else:
+            reply(bot, context, bot.tr("admin_caps_none"))
         return True
 
     if subcommand == "reloadplugins":
