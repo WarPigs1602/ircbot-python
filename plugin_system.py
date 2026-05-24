@@ -158,12 +158,16 @@ class PluginManager:
 
     def _reset_plugin_runtime_state(self) -> None:
         # Clear plugin-specific in-memory state so reload starts clean.
-        for attr_name in (
-            "_mondgesicht_channels",
-            "_moonface_round_states",
-            "_moonface_start_locks",
-            "_moonface_auto_start_deadlines",
-        ):
+        explicit_attrs = {
+            "_url_service",
+        }
+        plugin_prefixes = {f"_{name.strip().lower().replace('-', '_')}_" for name in self._loaded_plugins if name.strip()}
+        prefixed_attrs = tuple(
+            name
+            for name in vars(self.bot)
+            if any(name.startswith(prefix) for prefix in plugin_prefixes)
+        )
+        for attr_name in (*explicit_attrs, *prefixed_attrs):
             if hasattr(self.bot, attr_name):
                 delattr(self.bot, attr_name)
 
