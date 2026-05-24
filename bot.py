@@ -337,7 +337,18 @@ class IRCBot:
         self._url_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="urlsniff")
         self._runtime_stop_event = threading.Event()
         self._plugin_tick_thread: threading.Thread | None = None
+        self._url_service = None
+        self.spam_words = SPAM_WORDS
+        self.spam_hosts = SPAM_HOSTS
+        self.dangerous_content_types = DANGEROUS_CONTENT_TYPES
         self.plugin_manager = PluginManager(self, Path(__file__).resolve().parent / "plugins")
+
+    def _get_url_service(self):
+        if self._url_service is None:
+            from plugins.url_service import URLService
+
+            self._url_service = URLService()
+        return self._url_service
 
     def tr(self, key: str, **kwargs) -> str:
         language = self.config.language if self.config.language in {"de", "en"} else "de"
@@ -1308,7 +1319,7 @@ class IRCBot:
         self.plugin_manager.handle_privmsg(context)
 
     def build_url_usage_text(self, prefix: str) -> str:
-        max_id = self.get_max_url_id()
+        max_id = self._get_url_service().get_max_url_id(self)
         if max_id is None:
             return self.tr("usage_url", prefix=prefix, command=self.primary_command_name("url"))
         return self.tr("usage_url_with_max", prefix=prefix, command=self.primary_command_name("url"), max_id=max_id)
@@ -1550,142 +1561,6 @@ class IRCBot:
         except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
             return None
 
-    @staticmethod
-    def _is_timeout_error(exc: Exception) -> bool:
-        if isinstance(exc, TimeoutError):
-            return True
-        if isinstance(exc, URLError):
-            reason = str(getattr(exc, "reason", "")).lower()
-            return "timed out" in reason or "timeout" in reason
-        return "timed out" in str(exc).lower()
-
-    def describe_url(self, url: str) -> dict[str, str | int | bool | None]:
-        if self.is_youtube_url(url):
-            youtube_result = self.fetch_youtube_metadata(url)
-            if youtube_result:
-                return youtube_result
-
-            return {"status": "error", "message": self.tr("yt_api_no_metadata")}
-
-        return self.fetch_url_topic(url)
-
-    def is_youtube_url(self, url: str) -> bool:
-        parsed = urlparse(url)
-        host = parsed.netloc.lower()
-        return host in {
-            "youtu.be",
-            "www.youtu.be",
-            "youtube.com",
-            "www.youtube.com",
-            "m.youtube.com",
-            "music.youtube.com",
-            "youtube-nocookie.com",
-            "www.youtube-nocookie.com",
-        }
-
-    def extract_youtube_video_id(self, url: str) -> str | None:
-        parsed = urlparse(url)
-        host = parsed.netloc.lower()
-        path = parsed.path.strip("/")
-
-        if host in {"youtu.be", "www.youtu.be"}:
-            return path.split("/", 1)[0] or None
-
-        query = {}
-        if parsed.query:
-            for part in parsed.query.split("&"):
-                if "=" in part:
-                    key, value = part.split("=", 1)
-                    query[key] = value
-
-        if "v" in query:
-            return query["v"] or None
-
-        if path.startswith("embed/"):
-            return path.split("/", 1)[1] or None
-
-        if path.startswith("shorts/"):
-            return path.split("/", 1)[1] or None
-
-        if path.startswith("live/"):
-            return path.split("/", 1)[1] or None
-
-        return None
-
-    def fetch_youtube_metadata(self, url: str) -> dict[str, str | int | bool | None] | None:
-        video_id = self.extract_youtube_video_id(url)
-        if not video_id:
-            return {"status": "error", "message": self.tr("yt_invalid_id")}
-
-        if not self.config.youtube_api_key:
-            return {"status": "error", "message": self.tr("yt_missing_key")}
-
-        api_url = (
-            "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id="
-            f"{quote(video_id)}&key={quote(self.config.youtube_api_key)}"
-        )
-        data = self.fetch_json_with_timeout(api_url, self.config.url_timeout_seconds)
-        if not data:
-            return {"status": "error", "message": self.tr("yt_api_unreachable")}
-
-        api_error = data.get("error")
-        if api_error:
-            if isinstance(api_error, dict):
-                message = str(api_error.get("message", self.tr("unknown_error")))
-            else:
-                message = self.tr("unknown_error")
-            return {"status": "error", "message": f"YouTube-API: {message}"}
-
-        items = data.get("items") or []
-        if not items:
-            return {"status": "error", "message": self.tr("yt_no_data")}
-
-        item = items[0]
-        snippet = item.get("snippet") or {}
-        content_details = item.get("contentDetails") or {}
-        statistics = item.get("statistics") or {}
-
-        title = str(snippet.get("title", ""))
-        channel_title = str(snippet.get("channelTitle", ""))
-        duration = self.format_iso8601_duration(str(content_details.get("duration", "")))
-        view_count = statistics.get("viewCount")
-        try:
-            view_count = int(view_count) if view_count is not None else None
-        except (TypeError, ValueError):
-            view_count = None
-
-        like_count = self.safe_int(statistics.get("likeCount"))
-        comment_count = self.safe_int(statistics.get("commentCount"))
-
-        if not title:
-            return {"status": "error", "message": self.tr("yt_no_title")}
-
-        return {
-            "status": "ok",
-            "kind": "youtube",
-            "url": url,
-            "topic": title,
-            "channel_title": channel_title,
-            "duration_text": duration,
-            "view_count": view_count,
-            "like_count": like_count,
-            "comment_count": comment_count,
-            "published_text": self.format_youtube_date(str(snippet.get("publishedAt", ""))),
-            "description_text": self.extract_youtube_description(str(snippet.get("description", ""))),
-            "title_missing": False,
-        }
-
-    def fetch_json_with_timeout(self, url: str, timeout_seconds: float) -> dict[str, object] | None:
-        try:
-            request = Request(url, headers={"User-Agent": "Mozilla/5.0 IRCBot"})
-            with urlopen(request, timeout=timeout_seconds) as response:
-                payload = response.read()
-            decoded = payload.decode("utf-8", errors="replace")
-            parsed = json.loads(decoded)
-            return parsed
-        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
-            return None
-
     def format_iso8601_duration(self, duration: str) -> str:
         match = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration)
         if not match:
@@ -1745,40 +1620,6 @@ class IRCBot:
 
         text = f"{compact:.1f}".rstrip("0").rstrip(".")
         return f"{text}{suffix}"
-
-    def format_youtube_with_control_codes(
-        self,
-        title: str,
-        channel_title: str,
-        duration_text: str,
-        published_text: str,
-        view_count: object,
-        like_count: object,
-        comment_count: object,
-        requested_by: str,
-    ) -> str:
-        bold = "\x02"
-        reset = "\x0f"
-        red = "\x0304"
-        green = "\x0303"
-
-        header = f"{bold}{red}YouTube{reset} :: {bold}{title}{reset}"
-        details = []
-        if channel_title:
-            details.append(f"{green}{('Kanal' if self.config.language == 'de' else 'Channel')}:{reset} {channel_title}")
-        if published_text:
-            details.append(f"{green}{('Veröffentlicht' if self.config.language == 'de' else 'Published')}:{reset} {published_text}")
-        if duration_text:
-            details.append(f"{green}{('Dauer' if self.config.language == 'de' else 'Duration')}:{reset} {duration_text}")
-        if view_count is not None:
-            details.append(f"{green}{('Aufrufe' if self.config.language == 'de' else 'Views')}:{reset} {self.format_compact_number(view_count)}")
-        if like_count is not None:
-            details.append(f"{green}{('Likes' if self.config.language == 'de' else 'Likes')}:{reset} {self.format_compact_number(like_count)}")
-        if comment_count is not None:
-            details.append(f"{green}{('Kommentare' if self.config.language == 'de' else 'Comments')}:{reset} {self.format_compact_number(comment_count)}")
-
-        details_text = f" ({' | '.join(details)})" if details else ""
-        return f"{header}{details_text} (Requested by {requested_by})"
 
     def get_dart_stats_text(self, target_nick: str, requested_by: str) -> str:
         points, hit_text = self.roll_dart_turn()
@@ -1933,37 +1774,7 @@ class IRCBot:
         return self.tr("dart_top", items=" | ".join(leaderboard))
 
     def sniff_urls_in_message(self, message: str, channel: str, source_nick: str) -> None:
-        seen_in_message: set[str] = set()
-        for raw_url in URL_PATTERN.findall(message):
-            normalized_url = self.normalize_url(raw_url)
-            if not normalized_url or normalized_url in seen_in_message:
-                continue
-
-            seen_in_message.add(normalized_url)
-            record = self.fetch_url_by_value(normalized_url)
-            if record and self.is_flagged(record):
-                continue
-            if record:
-                cached_result = self.build_cached_url_result(record)
-                if cached_result:
-                    self.handle_url_result(cached_result, channel, requested_by=source_nick, show_max_id=True)
-                    continue
-
-            if self.is_spammy(normalized_url):
-                self.block_url(normalized_url)
-                continue
-
-            topic_result = self.describe_url(normalized_url)
-            if topic_result.get("status") == "ok":
-                stored_url_id = self.store_url_if_missing(
-                    normalized_url,
-                    source_nick,
-                    topic=str(topic_result.get("topic", "")) or None,
-                    title_missing=bool(topic_result.get("title_missing", False)),
-                )
-                if stored_url_id is not None:
-                    topic_result["id"] = stored_url_id
-            self.handle_url_result(topic_result, channel, requested_by=source_nick, show_max_id=True)
+        self._get_url_service().sniff_urls_in_message(self, message, channel, source_nick)
 
     def handle_url_result(
         self,
@@ -1972,384 +1783,17 @@ class IRCBot:
         requested_by: str,
         show_max_id: bool = False,
     ) -> None:
-        max_id = self.safe_int(result.get("max_id")) if (result and show_max_id) else None
-        if show_max_id and max_id is None:
-            max_id = self.get_max_url_id()
-        max_id_suffix = f" | {self.tr('url_max_id', max_id=max_id)}" if max_id is not None else ""
-
-        if not result:
-            self.send_privmsg(reply_target, f"{self.tr('url_not_found')}{max_id_suffix}")
-            return
-
-        status = str(result.get("status", ""))
-        if status == "discarded":
-            return
-        if status == "blocked":
-            self.send_privmsg(reply_target, f"{self.tr('url_blocked')}{max_id_suffix}")
-            return
-        if status == "deadlink":
-            http_status = self.safe_int(result.get("http_status"))
-            status_suffix = f" (HTTP {http_status})" if http_status is not None else ""
-            self.send_privmsg(reply_target, f"{self.tr('url_dead')}{status_suffix}{max_id_suffix}")
-            return
-        if status == "too_large":
-            self.send_privmsg(reply_target, f"{self.tr('url_too_large')}{max_id_suffix}")
-            return
-        if status == "error":
-            self.send_privmsg(reply_target, f"{self.tr('url_error', message=result.get('message', self.tr('unknown')))}{max_id_suffix}")
-            return
-
-        url_id = self.safe_int(result.get("id"))
-        id_prefix = f"[#{url_id}] " if url_id is not None else ""
-
-        if str(result.get("kind", "")) == "youtube":
-            title = str(result.get("topic", ""))
-            channel_title = str(result.get("channel_title", ""))
-            duration_text = str(result.get("duration_text", ""))
-            published_text = str(result.get("published_text", ""))
-            view_count = result.get("view_count")
-            like_count = result.get("like_count")
-            comment_count = result.get("comment_count")
-
-            if self.allows_control_codes(reply_target):
-                self.send_privmsg(
-                    reply_target,
-                    f"{id_prefix}" + self.format_youtube_with_control_codes(
-                        title=title,
-                        channel_title=channel_title,
-                        duration_text=duration_text,
-                        published_text=published_text,
-                        view_count=view_count,
-                        like_count=like_count,
-                        comment_count=comment_count,
-                        requested_by=requested_by,
-                    ) + max_id_suffix,
-                )
-                return
-
-            parts = []
-            if channel_title:
-                parts.append(self.tr("yt_channel", channel=channel_title))
-            if duration_text:
-                parts.append(self.tr("yt_duration", duration=duration_text))
-            if published_text:
-                parts.append(self.tr("yt_published", published=published_text))
-            if view_count is not None:
-                parts.append(self.tr("yt_views", count=view_count))
-            if like_count is not None:
-                parts.append(self.tr("yt_likes", count=like_count))
-            if comment_count is not None:
-                parts.append(self.tr("yt_comments", count=comment_count))
-
-            suffix = f" ({' | '.join(parts)})" if parts else ""
-            self.send_privmsg(reply_target, f"{id_prefix}YouTube :: {title}{suffix} (Requested by {requested_by}){max_id_suffix}")
-            return
-
-        url = str(result.get("url", ""))
-        topic = str(result.get("topic", ""))
-        title_missing = bool(result.get("title_missing", False))
-        if not url:
-            self.send_privmsg(reply_target, self.tr("url_not_found"))
-            return
-
-        if not topic:
-            self.send_privmsg(reply_target, f"{id_prefix}{self.tr('url_no_html_topic', url=url)}{max_id_suffix}")
-            return
-        if title_missing:
-            self.send_privmsg(reply_target, f"{id_prefix}{self.tr('url_without_title', url=url, topic=topic, requested_by=requested_by)}{max_id_suffix}")
-            return
-
-        is_dangerous = bool(result.get("is_dangerous", False)) or topic in DANGEROUS_CONTENT_TYPES
-        if is_dangerous:
-            if self.allows_control_codes(reply_target):
-                bold = "\x02"
-                red = "\x0304"
-                reset_code = "\x0f"
-                warn_label = f"{bold}{red}{self.tr('url_dangerous_file')}{reset_code}"
-            else:
-                warn_label = self.tr("url_dangerous_file")
-            self.send_privmsg(reply_target, f"{id_prefix}{url} :: {warn_label}: {topic} (Requested by {requested_by}){max_id_suffix}")
-            return
-
-        self.send_privmsg(reply_target, f"{id_prefix}{url} :: {topic} (Requested by {requested_by}){max_id_suffix}")
+        self._get_url_service().handle_url_result(self, result, reply_target, requested_by, show_max_id)
 
     def fetch_url_by_id(self, url_id: int) -> dict[str, str | int | bool | None] | None:
         if pymysql is None:
             return {"status": "error", "message": "pymysql missing." if self.config.language == "en" else "Python-Paket 'pymysql' fehlt."}
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return {"status": "error", "message": "Database unavailable." if self.config.language == "en" else "Datenbank nicht erreichbar."}
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE id = %s LIMIT 1",
-                    (url_id,),
-                )
-                row = cur.fetchone()
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
-        finally:
-            conn.close()
-
-        if not row:
-            return None
-
-        if int(row.get("is_blocked", 0)):
-            return {"status": "blocked", "url": str(row.get("url", ""))}
-        if int(row.get("is_deadlink", 0)):
-            return {"status": "deadlink", "url": str(row.get("url", ""))}
-
-        cached_result = self.build_cached_url_result(row)
-        if cached_result:
-            cached_result["max_id"] = self.get_max_url_id()
-            return cached_result
-
-        topic_result = self.describe_url(str(row.get("url", "")))
-        if topic_result and topic_result.get("status") == "ok":
-            topic_result["id"] = int(row.get("id", url_id))
-            topic_result["max_id"] = self.get_max_url_id()
-            self.store_url_if_missing(
-                str(row.get("url", "")),
-                str(row.get("posted_by", "")),
-                topic=str(topic_result.get("topic", "")) or None,
-                title_missing=bool(topic_result.get("title_missing", False)),
-            )
-            return topic_result
-        if topic_result and topic_result.get("status") == "blocked":
-            return topic_result
-        if topic_result and topic_result.get("status") == "deadlink":
-            return topic_result
-        return {"status": "error", "message": "URL could not be read." if self.config.language == "en" else "URL konnte nicht gelesen werden."}
+        return self._get_url_service().fetch_url_by_id(self, url_id)
 
     def fetch_random_url(self) -> dict[str, str | int | bool | None] | None:
         if pymysql is None:
             return {"status": "error", "message": "pymysql missing." if self.config.language == "en" else "Python-Paket 'pymysql' fehlt."}
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return {"status": "error", "message": "Database unavailable." if self.config.language == "en" else "Datenbank nicht erreichbar."}
-
-        try:
-            with conn.cursor() as cur:
-                for _ in range(10):
-                    cur.execute(
-                        "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE is_blocked = 0 AND is_deadlink = 0 ORDER BY RAND() LIMIT 1"
-                    )
-                    row = cur.fetchone()
-                    if not row:
-                        return None
-
-                    cached_result = self.build_cached_url_result(row)
-                    if cached_result:
-                        cached_result["max_id"] = self.get_max_url_id()
-                        return cached_result
-
-                    topic_result = self.describe_url(str(row.get("url", "")))
-                    if topic_result.get("status") == "ok":
-                        topic_result["id"] = int(row.get("id", 0))
-                        topic_result["max_id"] = self.get_max_url_id()
-                        self.store_url_if_missing(
-                            str(row.get("url", "")),
-                            str(row.get("posted_by", "")),
-                            topic=str(topic_result.get("topic", "")) or None,
-                            title_missing=bool(topic_result.get("title_missing", False)),
-                        )
-                        return topic_result
-                    if topic_result.get("status") == "error":
-                        return topic_result
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
-        finally:
-            conn.close()
-
-        return None
-
-    def fetch_url_by_value(self, url: str) -> dict[str, str | int | bool | None] | None:
-        if pymysql is None:
-            return None
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return None
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE url = %s ORDER BY id DESC LIMIT 1",
-                    (url,),
-                )
-                row = cur.fetchone()
-        except Exception:
-            return None
-        finally:
-            conn.close()
-
-        if not row:
-            return None
-
-        return row
-
-    def build_cached_url_result(self, row: dict[str, str | int | bool | None]) -> dict[str, str | int | bool | None] | None:
-        url = str(row.get("url", ""))
-        if self.is_youtube_url(url):
-            return None
-
-        topic_value = row.get("topic")
-        topic = str(topic_value).strip() if topic_value is not None else ""
-        if not topic:
-            return None
-
-        return {
-            "status": "ok",
-            "id": self.safe_int(row.get("id")),
-            "url": url,
-            "topic": topic,
-            "title_missing": bool(int(row.get("title_missing", 0) or 0)),
-        }
-
-    def fetch_url_topic(self, url: str) -> dict[str, str | int | bool | None]:
-        if self.is_spammy(url):
-            self.block_url(url)
-            return {"status": "blocked", "url": url}
-
-        try:
-            head_request = Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 IRCBot"},
-                method="HEAD",
-            )
-            head_content_type: str | None = None
-            try:
-                with urlopen(head_request, timeout=self.config.url_timeout_seconds) as response:
-                    head_status = getattr(response, "status", None)
-                    head_content_type = response.headers.get_content_type()
-            except HTTPError as exc:
-                head_status = exc.code
-
-            if head_status is not None and head_status not in {405, 501} and not 200 <= head_status < 300:
-                self.mark_deadlink(url)
-                return {"status": "deadlink", "url": url, "http_status": head_status}
-
-            if head_status not in {405, 501} and head_content_type is not None and head_content_type not in {"text/html", "application/xhtml+xml"}:
-                is_dangerous = head_content_type in DANGEROUS_CONTENT_TYPES
-                return {
-                    "status": "ok",
-                    "url": url,
-                    "topic": head_content_type,
-                    "title_missing": False,
-                    "content_type": head_content_type,
-                    "is_dangerous": is_dangerous,
-                    "http_status": head_status,
-                }
-
-            max_sniff_bytes = self.config.url_sniff_max_bytes
-            request = Request(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 IRCBot",
-                    "Range": f"bytes=0-{max_sniff_bytes - 1}",
-                },
-            )
-            with urlopen(request, timeout=self.config.url_timeout_seconds) as response:
-                response_headers = response.headers
-                content_length = self.safe_int(response_headers.get("Content-Length"))
-                if content_length is not None and content_length > self.config.url_max_content_length_bytes:
-                    return {"status": "too_large", "url": url, "http_status": getattr(response, "status", None)}
-
-                raw_bytes = response.read(max_sniff_bytes + 1)
-                if len(raw_bytes) > max_sniff_bytes:
-                    return {"status": "too_large", "url": url}
-
-                encoding = response_headers.get_content_charset() or "utf-8"
-                html_text = raw_bytes.decode(encoding, errors="replace")
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            if self._is_timeout_error(exc):
-                return {"status": "discarded", "url": url}
-            self.mark_deadlink(url)
-            return {"status": "deadlink", "url": url}
-
-        topic, title_missing = self.extract_html_topic(html_text)
-        if not topic:
-            self.mark_deadlink(url)
-            return {"status": "deadlink", "url": url}
-
-        if self.is_spammy(topic):
-            self.block_url(url)
-            return {"status": "blocked", "url": url}
-
-        return {"status": "ok", "url": url, "topic": topic, "title_missing": title_missing}
-
-    def store_url_if_missing(self, url: str, posted_by: str, topic: str | None = None, title_missing: bool = False) -> int | None:
-        conn = self.open_db_connection()
-        if conn is None:
-            return None
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM bot_url WHERE url = %s LIMIT 1", (url,))
-                existing_row = cur.fetchone()
-                if existing_row:
-                    if topic:
-                        cur.execute(
-                            "UPDATE bot_url SET topic = %s, title_missing = %s WHERE url = %s",
-                            (topic[:180], 1 if title_missing else 0, url),
-                        )
-                    return self.safe_int(existing_row.get("id"))
-
-                cur.execute("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM bot_url")
-                next_row = cur.fetchone() or {}
-                next_id = int(next_row.get("next_id", 1))
-
-                cur.execute(
-                    "INSERT INTO bot_url (id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing) VALUES (%s, %s, %s, %s, 0, 0, %s, %s)",
-                    (next_id, url, posted_by, self.current_time_string(), (topic[:180] if topic else None), 1 if title_missing else 0),
-                )
-                return next_id
-        except Exception:
-            return None
-        finally:
-            conn.close()
-
-        return None
-
-    def get_max_url_id(self) -> int | None:
-        conn = self.open_db_connection()
-        if conn is None:
-            return None
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT MAX(id) AS max_id FROM bot_url")
-                row = cur.fetchone() or {}
-                return self.safe_int(row.get("max_id"))
-        except Exception:
-            return None
-        finally:
-            conn.close()
-
-    def extract_html_topic(self, html_text: str) -> tuple[str, bool]:
-        parser = TopicParser()
-        parser.feed(html_text)
-        parser.close()
-        topic = parser.topic or parser.title
-        topic = unescape(topic).strip()
-        topic = re.sub(r"\s+", " ", topic)
-        title_missing = not bool(parser.title)
-        return topic[:180], title_missing
-
-    def is_spammy(self, text: str) -> bool:
-        lowered = text.lower()
-        if any(host in lowered for host in SPAM_HOSTS):
-            return True
-        return any(word in lowered for word in SPAM_WORDS)
-
-    def is_flagged(self, row: dict[str, str | int | bool | None]) -> bool:
-        return bool(int(row.get("is_blocked", 0))) or bool(int(row.get("is_deadlink", 0)))
-
-    def normalize_url(self, url: str) -> str:
-        return url.rstrip(".,;:!?)\"]}")
+        return self._get_url_service().fetch_random_url(self)
 
     def parse_int(self, value: str) -> int | None:
         try:
