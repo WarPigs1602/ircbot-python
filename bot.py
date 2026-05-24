@@ -140,6 +140,11 @@ ROLE_FLAG_COLUMNS = {
 }
 INVALID_HOSTMASK_MESSAGE = "Ungültige Hostmask."
 ROLE_EXISTS_QUERY = "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1"
+CONFIG_FILE_NAME = "config.json"
+CONFIG_MISSING_MESSAGE = "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
+SASL_RESULT_COMMANDS = frozenset({"900", "902", "903", "904", "905", "906", "907", "908"})
+STARTUP_COMPLETE_COMMANDS = frozenset({"376", "422"})
+CHANNEL_JOIN_FAILURE_COMMANDS = frozenset({"403", "405", "471", "473", "474", "475", "476", "477", "489"})
 
 
 @dataclass
@@ -413,7 +418,11 @@ class IRCBot:
         base_sock.settimeout(None)
 
         if self.config.use_tls:
-            ctx = ssl.create_default_context()
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            ctx.load_default_certs()
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             self.sock = ctx.wrap_socket(base_sock, server_hostname=self.config.server)
         else:
             self.sock = base_sock
@@ -1063,35 +1072,44 @@ class IRCBot:
         cap_tokens = self._parse_cap_tokens(caps_text)
 
         if subcommand == "LS":
-            requested_caps: list[str] = []
-            if self.should_use_sasl() and "sasl" in cap_tokens:
-                requested_caps.append("sasl")
-            if "userhost-in-names" in cap_tokens:
-                requested_caps.append("userhost-in-names")
-            if requested_caps:
-                self.send_raw(f"CAP REQ :{' '.join(requested_caps)}")
-                return
-            self.end_cap_negotiation()
+            self._handle_cap_ls(cap_tokens)
             return
 
         if subcommand == "ACK":
-            self.active_capabilities.update(cap_tokens)
-            if "userhost-in-names" in cap_tokens:
-                self.userhost_in_names_enabled = True
-                if self.startup_actions_completed:
-                    self.public_trigger_activation_at = 0.0
-            if self.should_use_sasl() and "sasl" in cap_tokens:
-                self.send_raw("AUTHENTICATE PLAIN")
-                return
-            self.end_cap_negotiation()
+            self._handle_cap_ack(cap_tokens)
             return
 
         if subcommand in {"NAK", "DEL"}:
-            if subcommand == "DEL":
-                self.active_capabilities.difference_update(cap_tokens)
-            if "userhost-in-names" in cap_tokens:
-                self.userhost_in_names_enabled = False
-            self.end_cap_negotiation()
+            self._handle_cap_nak_or_del(subcommand, cap_tokens)
+
+    def _handle_cap_ls(self, cap_tokens: set[str]) -> None:
+        requested_caps: list[str] = []
+        if self.should_use_sasl() and "sasl" in cap_tokens:
+            requested_caps.append("sasl")
+        if "userhost-in-names" in cap_tokens:
+            requested_caps.append("userhost-in-names")
+        if requested_caps:
+            self.send_raw(f"CAP REQ :{' '.join(requested_caps)}")
+            return
+        self.end_cap_negotiation()
+
+    def _handle_cap_ack(self, cap_tokens: set[str]) -> None:
+        self.active_capabilities.update(cap_tokens)
+        if "userhost-in-names" in cap_tokens:
+            self.userhost_in_names_enabled = True
+            if self.startup_actions_completed:
+                self.public_trigger_activation_at = 0.0
+        if self.should_use_sasl() and "sasl" in cap_tokens:
+            self.send_raw("AUTHENTICATE PLAIN")
+            return
+        self.end_cap_negotiation()
+
+    def _handle_cap_nak_or_del(self, subcommand: str, cap_tokens: set[str]) -> None:
+        if subcommand == "DEL":
+            self.active_capabilities.difference_update(cap_tokens)
+        if "userhost-in-names" in cap_tokens:
+            self.userhost_in_names_enabled = False
+        self.end_cap_negotiation()
 
     def send_sasl_plain_payload(self) -> None:
         if self.sasl_payload_sent:
@@ -1149,152 +1167,182 @@ class IRCBot:
 
             self.try_reclaim_preferred_nick()
 
-            if command == "CAP":
-                self.handle_cap_message(params)
+            if self._handle_server_command(prefix, command, params):
                 continue
 
-            if command == "005":
-                self.handle_isupport_message(params)
-                continue
+    def _handle_server_command(self, prefix: str, command: str, params: list[str]) -> bool:
+        handlers = (
+            self._handle_capability_and_startup_command,
+            self._handle_membership_command,
+            self._handle_server_feedback_command,
+            self._handle_channel_state_command,
+            self._handle_privmsg_command,
+        )
+        for handler in handlers:
+            if handler(prefix, command, params):
+                return True
+        return False
 
-            if command == "PONG":
-                self.handle_pong_message(params)
-                continue
+    def _handle_capability_and_startup_command(self, _prefix: str, command: str, params: list[str]) -> bool:
+        if command == "CAP":
+            self.handle_cap_message(params)
+            return True
+        if command == "005":
+            self.handle_isupport_message(params)
+            return True
+        if command == "PONG":
+            self.handle_pong_message(params)
+            return True
+        if command == "AUTHENTICATE":
+            self.handle_authenticate_message(params)
+            return True
+        if command in SASL_RESULT_COMMANDS:
+            self.handle_sasl_result(command)
+            return True
+        if command == "001":
+            self.send_nickserv_identify()
+            self.try_reclaim_preferred_nick(force=True)
+            self.complete_startup_actions()
+            return True
+        if command in STARTUP_COMPLETE_COMMANDS:
+            self.complete_startup_actions()
+            return True
+        return False
 
-            if command == "AUTHENTICATE":
-                self.handle_authenticate_message(params)
-                continue
+    def _handle_membership_command(self, prefix: str, command: str, params: list[str]) -> bool:
+        if command == "NICK" and len(params) >= 1:
+            self._handle_nick_change(prefix, params[0])
+            return True
+        if command == "JOIN" and len(params) >= 1:
+            self._handle_join(prefix, params[0])
+            return True
+        if command == "PART" and len(params) >= 1:
+            self._handle_part(prefix, params[0])
+            return True
+        if command == "KICK" and len(params) >= 2:
+            self._handle_kick(params[0], params[1])
+            return True
+        if command == "QUIT":
+            quit_nick = prefix.split("!", 1)[0] if prefix else ""
+            self.remove_channel_member_from_all(quit_nick)
+            return True
+        if command == "INVITE" and len(params) >= 2:
+            self._handle_invite(prefix, params[0], params[1])
+            return True
+        return False
 
-            if command in {"900", "902", "903", "904", "905", "906", "907", "908"}:
-                self.handle_sasl_result(command)
-                continue
+    def _handle_server_feedback_command(self, _prefix: str, command: str, params: list[str]) -> bool:
+        if command == "433":
+            old_nick = self.current_nick
+            if self.current_nick.lower() != self.fallback_nick.lower():
+                self.current_nick = self.fallback_nick
+                print(self.tr("nick_taken", old_nick=old_nick, new_nick=self.current_nick))
+                self.send_raw(f"NICK {self.current_nick}")
+            else:
+                print(self.tr("nick_taken", old_nick=old_nick, new_nick=self.current_nick))
+            return True
 
-            if command == "001":
-                self.send_nickserv_identify()
-                self.try_reclaim_preferred_nick(force=True)
-                self.complete_startup_actions()
-                continue
+        if command in CHANNEL_JOIN_FAILURE_COMMANDS and len(params) >= 2:
+            failed_channel = params[1].lstrip(":")
+            if failed_channel.startswith("#"):
+                print(self.tr("channel_not_joinable", channel=failed_channel))
+                self.forget_channel(failed_channel)
+            return True
 
-            if command in {"376", "422"}:
-                self.complete_startup_actions()
-                continue
+        return False
 
-            if command == "NICK" and len(params) >= 1:
-                changed_nick = prefix.split("!", 1)[0] if prefix else ""
-                new_nick = params[0].lstrip(":")
-                if changed_nick.lower() == self.current_nick.lower() and new_nick:
-                    self.current_nick = new_nick
-                    if new_nick.lower() == self.preferred_nick.lower():
-                        self.last_nick_reclaim_attempt_at = 0.0
-                self.rename_channel_member(changed_nick, new_nick)
-                self.update_admin_session_nick(changed_nick, new_nick)
-                continue
+    def _handle_channel_state_command(self, _prefix: str, command: str, params: list[str]) -> bool:
+        if command == "353" and len(params) >= 4:
+            self._handle_names_reply(params[2], params[3])
+            return True
+        if command == "324" and len(params) >= 3:
+            channel = params[1]
+            modes = params[2]
+            self.channel_modes[channel] = self.parse_mode_snapshot(modes)
+            return True
+        if command == "221" and len(params) >= 2:
+            self.user_modes = self.parse_mode_snapshot(params[1])
+            return True
+        if command == "MODE" and len(params) >= 2:
+            target = params[0]
+            modes = params[1]
+            if target.startswith("#"):
+                self.apply_mode_delta(target, modes)
+            elif target.lower() == self.current_nick.lower():
+                self.apply_user_mode_delta(modes)
+            return True
+        return False
 
-            if command == "JOIN" and len(params) >= 1:
-                joined_channel = params[0].lstrip(":")
-                joined_nick, joined_ident, joined_host = self.split_hostmask(prefix)
-                self.add_channel_member(joined_channel, joined_nick)
-                if joined_nick.lower() == self.current_nick.lower() and joined_channel:
-                    self.remember_channel(joined_channel)
-                    if not self.userhost_in_names_enabled:
-                        self.request_channel_modes(joined_channel)
-                    self.request_channel_members(joined_channel)
-                    self.request_channel_who(joined_channel)
-                elif joined_channel:
-                    self.apply_configured_channel_modes(joined_channel, joined_nick, joined_ident, joined_host)
-                continue
+    def _handle_privmsg_command(self, prefix: str, command: str, params: list[str]) -> bool:
+        if command != "PRIVMSG" or len(params) < 2:
+            return False
+        target = params[0]
+        message = params[1]
+        source_nick, source_ident, source_host = self.split_hostmask(prefix)
+        self.handle_privmsg(source_nick, source_ident, source_host, target, message)
+        return True
 
-            if command == "PART" and len(params) >= 1:
-                parted_channel = params[0].lstrip(":")
-                parted_nick = prefix.split("!", 1)[0] if prefix else ""
-                self.remove_channel_member(parted_channel, parted_nick)
-                if parted_nick.lower() == self.current_nick.lower() and parted_channel:
-                    self.forget_channel(parted_channel)
-                continue
+    def _handle_nick_change(self, prefix: str, new_nick_raw: str) -> None:
+        changed_nick = prefix.split("!", 1)[0] if prefix else ""
+        new_nick = new_nick_raw.lstrip(":")
+        if changed_nick.lower() == self.current_nick.lower() and new_nick:
+            self.current_nick = new_nick
+            if new_nick.lower() == self.preferred_nick.lower():
+                self.last_nick_reclaim_attempt_at = 0.0
+        self.rename_channel_member(changed_nick, new_nick)
+        self.update_admin_session_nick(changed_nick, new_nick)
 
-            if command == "KICK" and len(params) >= 2:
-                kicked_channel = params[0].lstrip(":")
-                kicked_nick = params[1]
-                self.remove_channel_member(kicked_channel, kicked_nick)
-                if kicked_nick.lower() == self.current_nick.lower() and kicked_channel:
-                    self.forget_channel(kicked_channel)
-                continue
+    def _handle_join(self, prefix: str, joined_channel_raw: str) -> None:
+        joined_channel = joined_channel_raw.lstrip(":")
+        joined_nick, joined_ident, joined_host = self.split_hostmask(prefix)
+        self.add_channel_member(joined_channel, joined_nick)
+        if joined_nick.lower() == self.current_nick.lower() and joined_channel:
+            self.remember_channel(joined_channel)
+            if not self.userhost_in_names_enabled:
+                self.request_channel_modes(joined_channel)
+            self.request_channel_members(joined_channel)
+            self.request_channel_who(joined_channel)
+            return
+        if joined_channel:
+            self.apply_configured_channel_modes(joined_channel, joined_nick, joined_ident, joined_host)
 
-            if command == "QUIT":
-                quit_nick = prefix.split("!", 1)[0] if prefix else ""
-                self.remove_channel_member_from_all(quit_nick)
-                continue
+    def _handle_part(self, prefix: str, parted_channel_raw: str) -> None:
+        parted_channel = parted_channel_raw.lstrip(":")
+        parted_nick = prefix.split("!", 1)[0] if prefix else ""
+        self.remove_channel_member(parted_channel, parted_nick)
+        if parted_nick.lower() == self.current_nick.lower() and parted_channel:
+            self.forget_channel(parted_channel)
 
-            if command == "433":
-                old_nick = self.current_nick
-                if self.current_nick.lower() != self.fallback_nick.lower():
-                    self.current_nick = self.fallback_nick
-                    print(self.tr("nick_taken", old_nick=old_nick, new_nick=self.current_nick))
-                    self.send_raw(f"NICK {self.current_nick}")
-                else:
-                    print(self.tr("nick_taken", old_nick=old_nick, new_nick=self.current_nick))
-                continue
+    def _handle_kick(self, kicked_channel_raw: str, kicked_nick: str) -> None:
+        kicked_channel = kicked_channel_raw.lstrip(":")
+        self.remove_channel_member(kicked_channel, kicked_nick)
+        if kicked_nick.lower() == self.current_nick.lower() and kicked_channel:
+            self.forget_channel(kicked_channel)
 
-            if command in {"403", "405", "471", "473", "474", "475", "476", "477", "489"} and len(params) >= 2:
-                failed_channel = params[1].lstrip(":")
-                if failed_channel.startswith("#"):
-                    print(self.tr("channel_not_joinable", channel=failed_channel))
-                    self.forget_channel(failed_channel)
-                continue
+    def _handle_invite(self, prefix: str, invited_nick: str, invited_channel: str) -> None:
+        inviter_nick = prefix.split("!", 1)[0] if prefix else ""
+        if invited_nick.lower() != self.current_nick.lower():
+            return
+        self.remember_channel(invited_channel)
+        self.send_raw(f"JOIN {invited_channel}")
+        if not self.userhost_in_names_enabled:
+            self.request_channel_modes(invited_channel)
+        self.request_channel_members(invited_channel)
+        if inviter_nick:
+            self.send_action(
+                invited_channel,
+                f"slaps {inviter_nick} around a bit with a large {self.current_nick}",
+            )
 
-            if command == "INVITE" and len(params) >= 2:
-                invited_nick = params[0]
-                invited_channel = params[1]
-                inviter_nick = prefix.split("!", 1)[0] if prefix else ""
-
-                if invited_nick.lower() == self.current_nick.lower():
-                    self.remember_channel(invited_channel)
-                    self.send_raw(f"JOIN {invited_channel}")
-                    if not self.userhost_in_names_enabled:
-                        self.request_channel_modes(invited_channel)
-                    self.request_channel_members(invited_channel)
-                    if inviter_nick:
-                        self.send_action(
-                            invited_channel,
-                            f"slaps {inviter_nick} around a bit with a large {self.current_nick}",
-                        )
-                continue
-
-            if command == "353" and len(params) >= 4:
-                names_channel = params[2]
-                names_members = params[3].lstrip(":").split()
-                self.add_channel_members(names_channel, names_members)
-                if self.userhost_in_names_enabled:
-                    for member in names_members:
-                        member_nick, member_ident, member_host = self.parse_names_member_hostmask(member)
-                        if member_nick and member_ident and member_host:
-                            self.apply_configured_channel_modes(names_channel, member_nick, member_ident, member_host)
-                continue
-
-            if command == "324" and len(params) >= 3:
-                channel = params[1]
-                modes = params[2]
-                self.channel_modes[channel] = self.parse_mode_snapshot(modes)
-                continue
-
-            if command == "221" and len(params) >= 2:
-                self.user_modes = self.parse_mode_snapshot(params[1])
-                continue
-
-            if command == "MODE" and len(params) >= 2:
-                target = params[0]
-                modes = params[1]
-                if target.startswith("#"):
-                    self.apply_mode_delta(target, modes)
-                elif target.lower() == self.current_nick.lower():
-                    self.apply_user_mode_delta(modes)
-                continue
-
-            if command == "PRIVMSG" and len(params) >= 2:
-                target = params[0]
-                message = params[1]
-                source_nick, source_ident, source_host = self.split_hostmask(prefix)
-                self.handle_privmsg(source_nick, source_ident, source_host, target, message)
+    def _handle_names_reply(self, names_channel: str, names_param: str) -> None:
+        names_members = names_param.lstrip(":").split()
+        self.add_channel_members(names_channel, names_members)
+        if not self.userhost_in_names_enabled:
+            return
+        for member in names_members:
+            member_nick, member_ident, member_host = self.parse_names_member_hostmask(member)
+            if member_nick and member_ident and member_host:
+                self.apply_configured_channel_modes(names_channel, member_nick, member_ident, member_host)
 
     def handle_privmsg(self, source_nick: str, source_ident: str, source_host: str, target: str, message: str) -> None:
         prefix = self.config.command_prefix
@@ -1414,24 +1462,38 @@ class IRCBot:
         return self.geocode_location_name(location)
 
     def geocode_postal_code(self, postal_code: str, location: str) -> dict[str, object] | None:
+        zip_result = self._geocode_postal_code_zippopotam(postal_code)
+        if zip_result:
+            return zip_result
+        return self._geocode_postal_code_nominatim(postal_code, location)
+
+    def _geocode_postal_code_zippopotam(self, postal_code: str) -> dict[str, object] | None:
         zippopotam_url = f"https://api.zippopotam.us/de/{quote(postal_code)}"
         zip_data = self.fetch_json(zippopotam_url)
-        if isinstance(zip_data, dict):
-            places = zip_data.get("places") or []
-            if places:
-                place = places[0]
-                place_name = str(place.get("place name", ""))
-                state = str(place.get("state", ""))
-                latitude = self.safe_float(place.get("latitude"))
-                longitude = self.safe_float(place.get("longitude"))
-                if latitude is not None and longitude is not None:
-                    return {
-                        "name": place_name or postal_code,
-                        "admin1": state,
-                        "country": str(zip_data.get("country", "Germany" if self.config.language == "en" else "Deutschland")),
-                        "latitude": latitude,
-                        "longitude": longitude,
-                    }
+        if not isinstance(zip_data, dict):
+            return None
+
+        places = zip_data.get("places") or []
+        if not places:
+            return None
+
+        place = places[0]
+        place_name = str(place.get("place name", ""))
+        state = str(place.get("state", ""))
+        latitude = self.safe_float(place.get("latitude"))
+        longitude = self.safe_float(place.get("longitude"))
+        if latitude is None or longitude is None:
+            return None
+
+        return {
+            "name": place_name or postal_code,
+            "admin1": state,
+            "country": str(zip_data.get("country", "Germany" if self.config.language == "en" else "Deutschland")),
+            "latitude": latitude,
+            "longitude": longitude,
+        }
+
+    def _geocode_postal_code_nominatim(self, postal_code: str, location: str) -> dict[str, object] | None:
 
         geocode_url = (
             "https://nominatim.openstreetmap.org/search?"
@@ -1558,7 +1620,7 @@ class IRCBot:
             decoded = payload.decode("utf-8", errors="replace")
             parsed = json.loads(decoded)
             return parsed
-        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             return None
 
     def format_iso8601_duration(self, duration: str) -> str:
@@ -1719,7 +1781,7 @@ class IRCBot:
         if pymysql is None:
             return self.tr("dart_db_missing_pkg")
 
-        def open_connection(password_value: str | bytes) -> "pymysql.connections.Connection":
+        def open_connection(password_value: str | bytes):
             return pymysql.connect(
                 host=self.config.mysql_host,
                 port=self.config.mysql_port,
@@ -3068,52 +3130,85 @@ def ensure_admin_bootstrap_for_configs(configs: list[BotConfig], interactive: bo
             bot.close()
 
 
+def _run_bot_cycle(config: BotConfig, stop_event: threading.Event | None) -> tuple[bool, float, IRCBot]:
+    bot = IRCBot(config)
+    bot.setup_oidentd_conf()
+    bot.ensure_database_setup()
+    bot.ensure_admin_bootstrap(sys.stdin.isatty())
+    connected_at = time.monotonic()
+    should_stop = _execute_bot_cycle(bot, config, stop_event)
+    uptime = time.monotonic() - connected_at
+    return should_stop, uptime, bot
+
+
+def _execute_bot_cycle(bot: IRCBot, config: BotConfig, stop_event: threading.Event | None) -> bool:
+    try:
+        print(f"[{config.display_name()}] " + bot.tr("connecting", server=config.server, port=config.port, tls=config.use_tls))
+        bot.connect()
+        bot.run()
+        print(f"[{config.display_name()}] " + bot.tr("connection_closed"))
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            print(f"[{config.display_name()}] " + bot.tr("shutting_down"))
+            if stop_event:
+                stop_event.set()
+            return True
+        if isinstance(exc, OSError):
+            print(f"[{config.display_name()}] " + bot.tr("network_error", error=exc))
+            return False
+        raise
+    finally:
+        bot.close()
+    return False
+
+
+def _wait_for_reconnect(stop_event: threading.Event | None, retry_wait: int) -> bool:
+    if stop_event:
+        return stop_event.wait(retry_wait)
+    time.sleep(retry_wait)
+    return False
+
+
+def _next_retry_wait(base_retry_wait: int, current_retry_wait: int, max_retry_wait: int, uptime: float) -> int:
+    if uptime >= 300:
+        return base_retry_wait
+    return min(max_retry_wait, max(base_retry_wait, current_retry_wait * 2))
+
+
 def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None) -> None:
     base_retry_wait = max(30, config.reconnect_delay_seconds)
     retry_wait = base_retry_wait
     max_retry_wait = 300
     while not (stop_event and stop_event.is_set()):
-        bot = IRCBot(config)
-        bot.setup_oidentd_conf()
-        bot.ensure_database_setup()
-        bot.ensure_admin_bootstrap(sys.stdin.isatty())
-        connected_at = time.monotonic()
-        try:
-            print(f"[{config.display_name()}] " + bot.tr("connecting", server=config.server, port=config.port, tls=config.use_tls))
-            bot.connect()
-            bot.run()
-            print(f"[{config.display_name()}] " + bot.tr("connection_closed"))
-        except (OSError, ssl.SSLError) as exc:
-            print(f"[{config.display_name()}] " + bot.tr("network_error", error=exc))
-        except KeyboardInterrupt:
-            print(f"[{config.display_name()}] " + bot.tr("shutting_down"))
-            if stop_event:
-                stop_event.set()
+        should_stop, uptime, bot = _run_bot_cycle(config, stop_event)
+        if should_stop:
             break
-        finally:
-            bot.close()
 
         if stop_event and stop_event.is_set():
             break
 
         print(f"[{config.display_name()}] " + bot.tr("reconnect_in", seconds=retry_wait))
-        if stop_event:
-            if stop_event.wait(retry_wait):
-                break
-        else:
-            time.sleep(retry_wait)
+        if _wait_for_reconnect(stop_event, retry_wait):
+            break
 
-        uptime = time.monotonic() - connected_at
-        if uptime >= 300:
-            retry_wait = base_retry_wait
-        else:
-            retry_wait = min(max_retry_wait, max(base_retry_wait, retry_wait * 2))
+        retry_wait = _next_retry_wait(base_retry_wait, retry_wait, max_retry_wait, uptime)
 
 
 def run_multiple_bots_forever(configs: list[BotConfig]) -> None:
     stop_event = threading.Event()
-    threads: list[threading.Thread] = []
+    threads = _start_bot_threads(configs, stop_event)
 
+    try:
+        _join_threads_until_stopped(threads)
+    except KeyboardInterrupt:
+        print("Beende Bots.")
+    finally:
+        stop_event.set()
+        _join_alive_threads(threads, timeout=2)
+
+
+def _start_bot_threads(configs: list[BotConfig], stop_event: threading.Event) -> list[threading.Thread]:
+    threads: list[threading.Thread] = []
     for config in configs:
         thread = threading.Thread(
             target=run_bot_forever,
@@ -3123,18 +3218,49 @@ def run_multiple_bots_forever(configs: list[BotConfig]) -> None:
         )
         thread.start()
         threads.append(thread)
+    return threads
+
+
+def _join_threads_until_stopped(threads: list[threading.Thread]) -> None:
+    while any(thread.is_alive() for thread in threads):
+        for thread in threads:
+            thread.join(timeout=0.5)
+
+
+def _join_alive_threads(threads: list[threading.Thread], timeout: float) -> None:
+    for thread in threads:
+        if thread.is_alive():
+            thread.join(timeout=timeout)
+
+
+def _load_configs_or_exit() -> list[BotConfig]:
+    config_path = Path(CONFIG_FILE_NAME)
+    if not config_path.exists():
+        raise SystemExit(CONFIG_MISSING_MESSAGE)
 
     try:
-        while any(thread.is_alive() for thread in threads):
-            for thread in threads:
-                thread.join(timeout=0.5)
-    except KeyboardInterrupt:
-        print("Beende Bots.")
-    finally:
-        stop_event.set()
-        for thread in threads:
-            if thread.is_alive():
-                thread.join(timeout=2)
+        return BotConfig.load_from_file(config_path)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _prepare_background_start() -> None:
+    configs = _load_configs_or_exit()
+    ensure_admin_bootstrap_for_configs(configs, sys.stdin.isatty())
+
+
+def _setup_foreground_pid_handling(pid_file: Path) -> None:
+    if pid_file.exists():
+        raise SystemExit(f"Start verweigert: PID-Datei existiert bereits ({pid_file}).")
+
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    atexit.register(lambda: remove_pid_file(pid_file))
+
+    def _shutdown_handler(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
 
 
 def main() -> None:
@@ -3158,56 +3284,19 @@ def main() -> None:
 
     if args.restart:
         stop_from_pid_file(pid_file)
-        config_path = Path("config.json")
-        if not config_path.exists():
-            raise SystemExit(
-                "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
-            )
-        try:
-            configs = BotConfig.load_from_file(config_path)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
-        ensure_admin_bootstrap_for_configs(configs, sys.stdin.isatty())
+        _prepare_background_start()
         start_background_process(pid_file)
         return
 
     if args.start:
-        config_path = Path("config.json")
-        if not config_path.exists():
-            raise SystemExit(
-                "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
-            )
-        try:
-            configs = BotConfig.load_from_file(config_path)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
-        ensure_admin_bootstrap_for_configs(configs, sys.stdin.isatty())
+        _prepare_background_start()
         start_background_process(pid_file)
         return
 
-    config_path = Path("config.json")
-    if not config_path.exists():
-        raise SystemExit(
-            "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
-        )
-
-    try:
-        configs = BotConfig.load_from_file(config_path)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
+    configs = _load_configs_or_exit()
 
     if args.run_foreground:
-        if pid_file.exists():
-            raise SystemExit(f"Start verweigert: PID-Datei existiert bereits ({pid_file}).")
-
-        pid_file.write_text(str(os.getpid()), encoding="utf-8")
-        atexit.register(lambda: remove_pid_file(pid_file))
-
-        def _shutdown_handler(_signum, _frame):
-            raise KeyboardInterrupt()
-
-        signal.signal(signal.SIGTERM, _shutdown_handler)
-        signal.signal(signal.SIGINT, _shutdown_handler)
+        _setup_foreground_pid_handling(pid_file)
 
     if len(configs) == 1:
         run_bot_forever(configs[0])
