@@ -72,6 +72,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
 
 **Commands:**
 - `help` — Displays available commands and their usage (sent as NOTICE)
+- `version` — Shows the bot version and GitHub repository URL (sent as NOTICE, also works in private messages as `version`/`ver` without login)
 - `ping [nick]` — Sends a ping response
 - `pong [nick]` — Sends a pong response
 - `lag` — Measures latency in milliseconds

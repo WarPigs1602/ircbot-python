@@ -198,7 +198,11 @@ def handle_help(bot, context, arg: str) -> None:
     mg_admin_entries = tuple(admin_mg_help_entries(bot, context))
     login_entries = tuple(admin_login_help_entries(bot, context))
     if context.is_private_message and login_entries and not admin_entries:
-        entries = ()
+        version_prefixes = tuple(
+            f"{context.command_prefix}{alias}"
+            for alias in bot.command_aliases().get("version", [])
+        )
+        entries = tuple(entry for entry in entries if entry.startswith(version_prefixes))
         mg_admin_entries = ()
     worker = threading.Thread(
         target=send_help_notices,
