@@ -2,39 +2,39 @@ import subprocess
 from pathlib import Path
 
 from plugin_system import CommandSpec, MessageHandlerSpec, PluginSpec
+try:
+    from version_info import version_line
+except ModuleNotFoundError:
+    _REPOSITORY_URL = "https://github.com/WarPigs1602/ircbot-python"
 
+    def _detect_version_fallback() -> str:
+        repo_root = Path(__file__).resolve().parents[2]
+        try:
+            branch = subprocess.check_output(
+                ["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            commit = subprocess.check_output(
+                ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            return "unbekannt"
 
-REPOSITORY_URL = "https://github.com/WarPigs1602/ircbot-python"
-
-
-def detect_version() -> str:
-    repo_root = Path(__file__).resolve().parents[2]
-    try:
-        branch = subprocess.check_output(
-            ["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "HEAD"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-        commit = subprocess.check_output(
-            ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
+        if branch and commit:
+            return f"{branch}@{commit}"
+        if commit:
+            return commit
         return "unbekannt"
 
-    if branch and commit:
-        return f"{branch}@{commit}"
-    if commit:
-        return commit
-    return "unbekannt"
-
-
-BOT_VERSION = detect_version()
+    def version_line() -> str:
+        return f"Python IRC Bot {_detect_version_fallback()} | GitHub: {_REPOSITORY_URL}"
 
 
 def send_version(bot, target: str) -> None:
-    bot.send_notice(target, f"Python IRC Bot {BOT_VERSION} | GitHub: {REPOSITORY_URL}")
+    bot.send_notice(target, version_line())
 
 
 def handle_version(bot, context, arg: str) -> None:

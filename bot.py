@@ -31,6 +31,35 @@ from urllib.parse import quote, quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 from plugin_system import MessageContext, PluginManager
+try:
+    from version_info import version_line
+except ModuleNotFoundError:
+    _REPOSITORY_URL = "https://github.com/WarPigs1602/ircbot-python"
+
+    def _detect_version_fallback() -> str:
+        repo_root = Path(__file__).resolve().parent
+        try:
+            branch = subprocess.check_output(
+                ["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            commit = subprocess.check_output(
+                ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            return "unbekannt"
+
+        if branch and commit:
+            return f"{branch}@{commit}"
+        if commit:
+            return commit
+        return "unbekannt"
+
+    def version_line() -> str:
+        return f"Python IRC Bot {_detect_version_fallback()} | GitHub: {_REPOSITORY_URL}"
 
 try:
     import pymysql
@@ -1349,6 +1378,8 @@ class IRCBot:
         is_private_message = target.lower() == self.current_nick.lower()
         reply_target = source_nick if is_private_message else target
         source_mask = self.user_mask_from_parts(source_ident, source_host) or ""
+        if self._handle_ctcp(source_nick, message):
+            return
         if not is_private_message and source_ident and source_host:
             for mode in self.get_user_channel_modes(source_mask, target):
                 if self.should_retry_member_mode(target, source_nick, mode, 60.0):
@@ -1365,6 +1396,19 @@ class IRCBot:
             is_private_message=is_private_message,
         )
         self.plugin_manager.handle_privmsg(context)
+
+    def _handle_ctcp(self, source_nick: str, message: str) -> bool:
+        if not source_nick:
+            return False
+        if not (message.startswith("\x01") and message.endswith("\x01") and len(message) >= 2):
+            return False
+
+        payload = message[1:-1].strip()
+        if payload.upper() != "VERSION":
+            return False
+
+        self.send_notice(source_nick, f"\x01VERSION {version_line()}\x01")
+        return True
 
     def build_url_usage_text(self, prefix: str) -> str:
         max_id = self._get_url_service().get_max_url_id(self)
