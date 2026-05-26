@@ -23,6 +23,14 @@ def handle_ping(bot, context, arg: str) -> None:
 PLUGIN = PluginSpec(
     name="ping",
     commands=(
-        CommandSpec(canonical="ping", handler=handle_ping, help_sort=20),
+        CommandSpec(
+            canonical="ping",
+            handler=handle_ping,
+            help_texts={
+                "de": "schickt einen Ping-Slap; optional mit Zielnick",
+                "en": "sends a ping slap; optionally with target nick",
+            },
+            help_sort=20,
+        ),
     ),
 )

@@ -231,6 +231,10 @@ PLUGIN = PluginSpec(
             handler=handle_help,
             aliases=("hilfe",),
             primary_names={"de": "hilfe", "en": "help"},
+            help_texts={
+                "de": "zeigt die verfuegbaren Befehle",
+                "en": "shows the available commands",
+            },
             help_sort=10,
         ),
         CommandSpec(

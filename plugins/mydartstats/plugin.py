@@ -30,6 +30,10 @@ PLUGIN = PluginSpec(
             handler=handle_mydartstats,
             aliases=("meinedartstats",),
             primary_names={"de": "meinedartstats", "en": "mydartstats"},
+            help_texts={
+                "de": "zeigt deine persoenlichen Dart-Stats",
+                "en": "shows your personal dart stats",
+            },
             help_sort=90,
         ),
     ),

@@ -29,6 +29,10 @@ PLUGIN = PluginSpec(
             canonical="echo",
             handler=handle_echo,
             help_args={"de": "<text>", "en": "<text>"},
+            help_texts={
+                "de": "sendet den Text per Notice zurueck",
+                "en": "sends the text back as a notice",
+            },
             help_sort=50,
         ),
     ),

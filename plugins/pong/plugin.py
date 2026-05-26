@@ -23,6 +23,14 @@ def handle_pong(bot, context, arg: str) -> None:
 PLUGIN = PluginSpec(
     name="pong",
     commands=(
-        CommandSpec(canonical="pong", handler=handle_pong, help_sort=30),
+        CommandSpec(
+            canonical="pong",
+            handler=handle_pong,
+            help_texts={
+                "de": "schickt einen Pong-Slap; optional mit Zielnick",
+                "en": "sends a pong slap; optionally with target nick",
+            },
+            help_sort=30,
+        ),
     ),
 )

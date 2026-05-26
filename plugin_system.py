@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import sys
+import threading
 from dataclasses import dataclass, field
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -86,37 +88,44 @@ class PluginSpec:
 class PluginManager:
     def __init__(self, bot: "IRCBot", plugins_dir: Path) -> None:
         self.bot = bot
-        self.plugins_dir = plugins_dir
+        self.plugins_dir = plugins_dir.resolve()
         self._commands_by_canonical: dict[str, CommandSpec] = {}
         self._commands_by_alias: dict[str, CommandSpec] = {}
         self._message_handlers: list[MessageHandler] = []
         self._tick_handlers: list[TickHandler] = []
         self._loaded_plugins: list[str] = []
         self._translations: dict[str, dict[str, str]] = {}
+        self._state_lock = threading.RLock()
         self.load_plugins()
 
     @property
     def loaded_plugins(self) -> tuple[str, ...]:
-        return tuple(self._loaded_plugins)
+        with self._state_lock:
+            return tuple(self._loaded_plugins)
 
     def command_aliases(self) -> dict[str, list[str]]:
-        return {name: list(spec.all_aliases()) for name, spec in self._commands_by_canonical.items()}
+        with self._state_lock:
+            return {name: list(spec.all_aliases()) for name, spec in self._commands_by_canonical.items()}
 
     def primary_command_name(self, canonical: str, language: str) -> str:
-        spec = self._commands_by_canonical.get(canonical)
+        with self._state_lock:
+            spec = self._commands_by_canonical.get(canonical)
         if spec is None:
             return canonical
         return spec.primary_name(language)
 
     def translation(self, key: str, language: str) -> str | None:
-        return self._translations.get(language, {}).get(key)
+        with self._state_lock:
+            return self._translations.get(language, {}).get(key)
 
     def resolve_command(self, token: str) -> CommandSpec | None:
-        return self._commands_by_alias.get(token.strip().lower())
+        with self._state_lock:
+            return self._commands_by_alias.get(token.strip().lower())
 
     def build_help_entries(self, prefix: str, language: str, context: MessageContext | None = None) -> tuple[str, ...]:
         rendered: list[str] = []
-        ordered = sorted(self._commands_by_canonical.values(), key=lambda spec: (spec.help_sort, spec.canonical))
+        with self._state_lock:
+            ordered = sorted(self._commands_by_canonical.values(), key=lambda spec: (spec.help_sort, spec.canonical))
         for spec in ordered:
             if context is not None and spec.help_visible is not None and not spec.help_visible(self.bot, context):
                 continue
@@ -133,7 +142,9 @@ class PluginManager:
         if not self.bot.public_triggers_enabled():
             return
 
-        for handler in self._message_handlers:
+        with self._state_lock:
+            message_handlers = tuple(self._message_handlers)
+        for handler in message_handlers:
             handler(self.bot, context)
 
         if not context.message.startswith(context.command_prefix):
@@ -146,14 +157,17 @@ class PluginManager:
         parts = cmdline.split(maxsplit=1)
         token = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
-        command = self.resolve_command(token)
+        with self._state_lock:
+            command = self._commands_by_alias.get(token)
         if command is None:
             return
 
         command.handler(self.bot, context, arg)
 
     def handle_tick(self) -> None:
-        for handler in self._tick_handlers:
+        with self._state_lock:
+            tick_handlers = tuple(self._tick_handlers)
+        for handler in tick_handlers:
             handler(self.bot)
 
     def _reset_plugin_runtime_state(self) -> None:
@@ -161,7 +175,9 @@ class PluginManager:
         explicit_attrs = {
             "_url_service",
         }
-        plugin_prefixes = {f"_{name.strip().lower().replace('-', '_')}_" for name in self._loaded_plugins if name.strip()}
+        with self._state_lock:
+            loaded_plugins_snapshot = tuple(self._loaded_plugins)
+        plugin_prefixes = {f"_{name.strip().lower().replace('-', '_')}_" for name in loaded_plugins_snapshot if name.strip()}
         prefixed_attrs = tuple(
             name
             for name in vars(self.bot)
@@ -174,81 +190,160 @@ class PluginManager:
     def reload_plugins(self) -> None:
         """Entlädt alle Plugin-Module aus sys.modules und lädt sie erneut."""
         self._reset_plugin_runtime_state()
-        for key in [k for k in sys.modules if k.startswith("ircbot_plugin_")]:
-            del sys.modules[key]
+        self._unload_plugin_modules()
         self.load_plugins()
 
-    def load_plugins(self) -> None:
-        self._commands_by_canonical.clear()
-        self._commands_by_alias.clear()
-        self._message_handlers.clear()
-        self._tick_handlers.clear()
-        self._loaded_plugins.clear()
-        self._translations.clear()
+    def _is_inside_plugins_dir(self, module_file: str | None) -> bool:
+        if not module_file:
+            return False
+        try:
+            module_path = Path(module_file).resolve()
+        except OSError:
+            return False
+        try:
+            module_path.relative_to(self.plugins_dir)
+            return True
+        except ValueError:
+            return False
 
+    def _unload_plugin_modules(self) -> None:
+        # Ensure file system changes are seen before next import.
+        importlib.invalidate_caches()
+        module_names_to_unload: set[str] = set()
+        for module_name, module in sys.modules.items():
+            if module_name.startswith("ircbot_plugin_"):
+                module_names_to_unload.add(module_name)
+                continue
+            if module_name == "plugins" or module_name.startswith("plugins."):
+                module_file = getattr(module, "__file__", None)
+                if self._is_inside_plugins_dir(module_file):
+                    module_names_to_unload.add(module_name)
+
+        for module_name in module_names_to_unload:
+            sys.modules.pop(module_name, None)
+
+    def _load_plugin_spec(self, plugin_path: Path) -> PluginSpec:
+        module_name = f"ircbot_plugin_{plugin_path.parent.name.lower()}"
+        spec = spec_from_file_location(module_name, plugin_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Plugin {plugin_path.parent.name} konnte nicht geladen werden.")
+
+        module = module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_name, None)
+            raise
+
+        plugin = getattr(module, "PLUGIN", None)
+        if not isinstance(plugin, PluginSpec):
+            raise TypeError(f"Plugin {plugin_path.parent.name} exportiert kein PluginSpec in PLUGIN.")
+        return plugin
+
+    @staticmethod
+    def _plugin_is_enabled(
+        plugin_path: Path,
+        plugin: PluginSpec,
+        enabled_plugins: set[str],
+        disabled_plugins: set[str],
+    ) -> bool:
+        plugin_name = plugin.name.strip().lower()
+        plugin_aliases = {
+            alias.strip().lower()
+            for alias in (plugin_path.parent.name, *plugin.aliases)
+            if alias.strip()
+        }
+        plugin_aliases.add(plugin_name)
+        if enabled_plugins:
+            return bool(plugin_aliases & enabled_plugins)
+        return plugin.enabled_by_default and not (plugin_aliases & disabled_plugins)
+
+    def load_plugins(self) -> None:
         if not self.plugins_dir.exists():
+            with self._state_lock:
+                self._commands_by_canonical.clear()
+                self._commands_by_alias.clear()
+                self._message_handlers.clear()
+                self._tick_handlers.clear()
+                self._loaded_plugins.clear()
+                self._translations.clear()
             return
 
         enabled_plugins = {name.strip().lower() for name in (self.bot.config.enabled_plugins or []) if name.strip()}
         disabled_plugins = {name.strip().lower() for name in (self.bot.config.disabled_plugins or []) if name.strip()}
 
-        for plugin_path in sorted(self.plugins_dir.glob("*/plugin.py")):
-            module_name = f"ircbot_plugin_{plugin_path.parent.name.lower()}"
-            spec = spec_from_file_location(module_name, plugin_path)
-            if spec is None or spec.loader is None:
-                continue
+        next_commands_by_canonical: dict[str, CommandSpec] = {}
+        next_commands_by_alias: dict[str, CommandSpec] = {}
+        next_message_handlers: list[MessageHandler] = []
+        next_tick_handlers: list[TickHandler] = []
+        next_loaded_plugins: list[str] = []
+        next_translations: dict[str, dict[str, str]] = {}
 
-            module = module_from_spec(spec)
-            spec.loader.exec_module(module)
-            plugin = getattr(module, "PLUGIN", None)
-            if not isinstance(plugin, PluginSpec):
-                raise TypeError(f"Plugin {plugin_path.parent.name} exportiert kein PluginSpec in PLUGIN.")
+        for plugin_path in sorted(self.plugins_dir.glob("*/plugin.py")):
+            plugin = self._load_plugin_spec(plugin_path)
+            if not self._plugin_is_enabled(plugin_path, plugin, enabled_plugins, disabled_plugins):
+                continue
 
             plugin_name = plugin.name.strip().lower()
-            plugin_aliases = {
-                alias.strip().lower()
-                for alias in (plugin_path.parent.name, *plugin.aliases)
-                if alias.strip()
-            }
-            plugin_aliases.add(plugin_name)
-            if enabled_plugins:
-                is_enabled = bool(plugin_aliases & enabled_plugins)
-            else:
-                is_enabled = plugin.enabled_by_default and not (plugin_aliases & disabled_plugins)
+            self._register_plugin(
+                plugin,
+                commands_by_canonical=next_commands_by_canonical,
+                commands_by_alias=next_commands_by_alias,
+                message_handlers=next_message_handlers,
+                tick_handlers=next_tick_handlers,
+                translation_catalogs=next_translations,
+            )
+            next_loaded_plugins.append(plugin_name)
 
-            if not is_enabled:
-                continue
+        with self._state_lock:
+            self._commands_by_canonical = next_commands_by_canonical
+            self._commands_by_alias = next_commands_by_alias
+            self._message_handlers = next_message_handlers
+            self._tick_handlers = next_tick_handlers
+            self._loaded_plugins = next_loaded_plugins
+            self._translations = next_translations
 
-            self._register_plugin(plugin)
-            self._loaded_plugins.append(plugin_name)
-
-    def _register_plugin(self, plugin: PluginSpec) -> None:
-        self._register_translations(plugin)
-        self._register_commands(plugin)
+    def _register_plugin(
+        self,
+        plugin: PluginSpec,
+        commands_by_canonical: dict[str, CommandSpec],
+        commands_by_alias: dict[str, CommandSpec],
+        message_handlers: list[MessageHandler],
+        tick_handlers: list[TickHandler],
+        translation_catalogs: dict[str, dict[str, str]],
+    ) -> None:
+        self._register_translations(plugin, translation_catalogs)
+        self._register_commands(plugin, commands_by_canonical, commands_by_alias)
 
         for message_handler in plugin.message_handlers:
-            self._message_handlers.append(message_handler.handler)
+            message_handlers.append(message_handler.handler)
 
         for tick_handler in plugin.tick_handlers:
-            self._tick_handlers.append(tick_handler.handler)
+            tick_handlers.append(tick_handler.handler)
 
-    def _register_translations(self, plugin: PluginSpec) -> None:
-        for language, translations in plugin.translations.items():
-            catalog = self._translations.setdefault(language, {})
-            for key, value in translations.items():
+    def _register_translations(self, plugin: PluginSpec, translation_catalogs: dict[str, dict[str, str]]) -> None:
+        for language, plugin_catalog in plugin.translations.items():
+            catalog = translation_catalogs.setdefault(language, {})
+            for key, value in plugin_catalog.items():
                 existing = catalog.get(key)
                 if existing is not None and existing != value:
                     raise ValueError(f"Übersetzungsschlüssel {key} kollidiert in Sprache {language}.")
                 catalog[key] = value
 
-    def _register_commands(self, plugin: PluginSpec) -> None:
+    def _register_commands(
+        self,
+        plugin: PluginSpec,
+        commands_by_canonical: dict[str, CommandSpec],
+        commands_by_alias: dict[str, CommandSpec],
+    ) -> None:
         for command in plugin.commands:
-            if command.canonical in self._commands_by_canonical:
+            if command.canonical in commands_by_canonical:
                 raise ValueError(f"Befehl {command.canonical} wurde mehrfach registriert.")
 
-            self._commands_by_canonical[command.canonical] = command
+            commands_by_canonical[command.canonical] = command
             for alias in command.all_aliases():
-                existing = self._commands_by_alias.get(alias)
+                existing = commands_by_alias.get(alias)
                 if existing is not None:
                     raise ValueError(f"Alias {alias} kollidiert mit {existing.canonical}.")
-                self._commands_by_alias[alias] = command
+                commands_by_alias[alias] = command

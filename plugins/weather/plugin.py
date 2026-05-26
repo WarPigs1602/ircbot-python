@@ -94,6 +94,10 @@ PLUGIN = PluginSpec(
             aliases=("wetter",),
             primary_names={"de": "wetter", "en": "weather"},
             help_args={"de": "<ort>", "en": "<location>"},
+            help_texts={
+                "de": "zeigt das aktuelle Wetter fuer einen Ort",
+                "en": "shows the current weather for a location",
+            },
             help_sort=100,
         ),
     ),

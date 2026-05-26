@@ -29,6 +29,14 @@ PLUGIN = PluginSpec(
     name="darttop10",
     translations=MESSAGES,
     commands=(
-        CommandSpec(canonical="darttop10", handler=handle_darttop10, help_sort=80),
+        CommandSpec(
+            canonical="darttop10",
+            handler=handle_darttop10,
+            help_texts={
+                "de": "zeigt die Top-10 der Dartpunkte",
+                "en": "shows the top 10 dart scores",
+            },
+            help_sort=80,
+        ),
     ),
 )

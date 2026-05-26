@@ -53,6 +53,10 @@ PLUGIN = PluginSpec(
             canonical="dart",
             handler=handle_dart,
             help_args={"de": "<nick>", "en": "<nick>"},
+            help_texts={
+                "de": "zeigt Dart-Stats fuer einen Nick; mit top10 die Rangliste",
+                "en": "shows dart stats for a nick; use top10 for the ranking",
+            },
             help_sort=70,
         ),
     ),

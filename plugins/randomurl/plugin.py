@@ -89,6 +89,10 @@ PLUGIN = PluginSpec(
             handler=handle_randomurl,
             aliases=("zufallsurl",),
             primary_names={"de": "zufallsurl", "en": "randomurl"},
+            help_texts={
+                "de": "zeigt eine zufaellige gespeicherte URL",
+                "en": "shows a random stored URL",
+            },
             help_sort=120,
         ),
     ),

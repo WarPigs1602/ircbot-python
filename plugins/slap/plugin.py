@@ -1,8 +1,10 @@
 from plugin_system import CommandSpec, PluginSpec
 
 
-def usage_text(prefix: str, command: str) -> str:
-    return f"Usage: {prefix}{command} <nick>"
+def usage_text(bot, prefix: str, command: str) -> str:
+    if bot.config.language == "en":
+        return f"Usage: {prefix}{command} <nick>"
+    return f"Nutzung: {prefix}{command} <nick>"
 
 
 def slap_action(target: str, item: str) -> str:
@@ -14,7 +16,7 @@ def handle_slap(bot, context, arg: str) -> None:
     if not target_nick:
         bot.send_privmsg(
             context.reply_target,
-            usage_text(context.command_prefix, bot.primary_command_name("slap")),
+            usage_text(bot, context.command_prefix, bot.primary_command_name("slap")),
         )
         return
 
@@ -31,6 +33,10 @@ PLUGIN = PluginSpec(
             canonical="slap",
             handler=handle_slap,
             help_args={"de": "<nick>", "en": "<nick>"},
+            help_texts={
+                "de": "verpasst einem Nick einen Action-Slap",
+                "en": "gives a nick an action slap",
+            },
             help_sort=60,
         ),
     ),

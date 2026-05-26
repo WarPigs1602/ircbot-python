@@ -101,6 +101,10 @@ PLUGIN = PluginSpec(
             canonical="url",
             handler=handle_url,
             help_args={"de": "<id>", "en": "<id>"},
+            help_texts={
+                "de": "zeigt eine gespeicherte URL anhand ihrer ID",
+                "en": "shows a stored URL by its ID",
+            },
             help_sort=110,
         ),
     ),

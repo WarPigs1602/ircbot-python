@@ -19,6 +19,14 @@ PLUGIN = PluginSpec(
     name="lag",
     translations=MESSAGES,
     commands=(
-        CommandSpec(canonical="lag", handler=handle_lag, help_sort=40),
+        CommandSpec(
+            canonical="lag",
+            handler=handle_lag,
+            help_texts={
+                "de": "misst den aktuellen IRC-Lag",
+                "en": "measures the current IRC lag",
+            },
+            help_sort=40,
+        ),
     ),
 )

@@ -36,7 +36,7 @@ MESSAGES = {
         "admin_help_raw_2": "Beispiel: raw MODE #chan +o Nick",
         "admin_help_caps": "caps zeigt die aktuell aktivierten IRC-Capabilities.",
         "admin_help_reload": "reloadplugins lädt alle Plugins dynamisch neu.",
-        "admin_reload_ok": "Plugins wurden neu geladen.",
+        "admin_reload_ok": "Plugins wurden neu geladen ({count}): {plugins}",
         "admin_reload_failed": "Plugins konnten nicht neu geladen werden: {error}",
         "admin_caps_none": "Keine IRC-Capabilities aktiviert.",
         "admin_caps_enabled": "Aktive IRC-Capabilities: {caps}",
@@ -96,7 +96,7 @@ MESSAGES = {
         "admin_help_raw_2": "Example: raw MODE #chan +o Nick",
         "admin_help_caps": "caps shows the currently active IRC capabilities.",
         "admin_help_reload": "reloadplugins dynamically reloads all plugins.",
-        "admin_reload_ok": "Plugins reloaded.",
+        "admin_reload_ok": "Plugins reloaded ({count}): {plugins}",
         "admin_reload_failed": "Failed to reload plugins: {error}",
         "admin_caps_none": "No IRC capabilities active.",
         "admin_caps_enabled": "Active IRC capabilities: {caps}",
@@ -595,7 +595,13 @@ def handle_admin_authenticated(bot, context, parts: list[str], source_mask: str,
     if subcommand == "reloadplugins":
         try:
             bot.plugin_manager.reload_plugins()
-            reply(bot, context, bot.tr("admin_reload_ok"))
+            loaded_plugins = bot.plugin_manager.loaded_plugins
+            rendered_plugins = ", ".join(loaded_plugins) if loaded_plugins else "-"
+            reply(
+                bot,
+                context,
+                bot.tr("admin_reload_ok", count=len(loaded_plugins), plugins=rendered_plugins),
+            )
         except Exception as exc:
             reply(bot, context, bot.tr("admin_reload_failed", error=str(exc)))
         return True
