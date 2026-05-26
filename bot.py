@@ -1455,14 +1455,12 @@ class IRCBot:
         temperature = weather_details["temperature"]
         feels_like = weather_details["feels_like"]
         humidity = weather_details["humidity"]
-        precipitation = weather_details["precipitation"]
         wind_speed = weather_details["wind_speed"]
         wind_direction = weather_details["wind_direction"]
 
         temperature_text = self.format_localized_number(temperature)
         feels_like_text = self.format_localized_number(feels_like)
         humidity_text = self.format_localized_number(humidity)
-        precipitation_text = self.format_localized_number(precipitation)
         wind_speed_text = self.format_localized_number(wind_speed)
 
         if self.allows_control_codes(reply_target):
@@ -1472,7 +1470,6 @@ class IRCBot:
                 feels_like,
                 humidity,
                 condition,
-                precipitation,
                 wind_speed,
                 wind_direction,
             )
@@ -1487,7 +1484,6 @@ class IRCBot:
             condition=condition,
             feels_like=feels_like_text,
             humidity=humidity_text,
-            precipitation=precipitation_text,
             wind_speed=wind_speed_text,
         )
 
@@ -1547,7 +1543,6 @@ class IRCBot:
             "temperature": self.openweather_main_value(weather_data, "temp"),
             "feels_like": self.openweather_main_value(weather_data, "feels_like"),
             "humidity": self.openweather_main_value(weather_data, "humidity"),
-            "precipitation": self.openweather_precipitation(weather_data),
             "wind_speed": self.openweather_wind_speed(weather_data),
             "wind_direction": self.openweather_wind_direction(weather_data),
         }
@@ -1572,19 +1567,6 @@ class IRCBot:
 
     def openweather_main_value(self, weather_data: dict[str, object], key: str) -> object:
         return self.dict_or_empty(weather_data.get("main")).get(key)
-
-    def openweather_precipitation(self, weather_data: dict[str, object]) -> object:
-        rain_dict = self.dict_or_empty(weather_data.get("rain"))
-        snow_dict = self.dict_or_empty(weather_data.get("snow"))
-
-        precipitation = rain_dict.get("1h")
-        if precipitation is None:
-            precipitation = rain_dict.get("3h")
-        if precipitation is None:
-            precipitation = snow_dict.get("1h")
-        if precipitation is None:
-            precipitation = snow_dict.get("3h")
-        return precipitation
 
     def openweather_wind_speed(self, weather_data: dict[str, object]) -> object:
         wind_speed_value = self.dict_or_empty(weather_data.get("wind")).get("speed")
@@ -1724,31 +1706,80 @@ class IRCBot:
         feels_like: object,
         humidity: object,
         condition: str,
-        precipitation: object,
         wind_speed: object,
         wind_direction: object,
     ) -> str:
         bold = "\x02"
         reset = "\x0f"
+        blue = "\x0312"
+        red = "\x0304"
+        green = "\x0303"
+        orange = "\x0307"
+        gray = "\x0314"
+
         temp_value = self.format_localized_number(temperature)
         feel_value = self.format_localized_number(feels_like)
         humidity_value = self.format_localized_number(humidity)
-        precipitation_value = self.format_localized_number(precipitation)
         wind_value = self.format_localized_number(wind_speed)
         direction_value = self.format_localized_number(wind_direction)
-        temp_text = f"\x0303{temp_value}°C{reset}" if temperature is not None else "n/a"
-        feel_text = f"{feel_value}°C" if feels_like is not None else "n/a"
-        humidity_text = f"{humidity_value}%" if humidity is not None else "n/a"
-        precipitation_text = f"{precipitation_value} mm" if precipitation is not None else "n/a"
-        wind_text = f"{wind_value} km/h" if wind_speed is not None else "n/a"
-        direction_text = f"{direction_value}°" if wind_direction is not None else "n/a"
+        temp_color = self.weather_temperature_color(temperature)
+        feel_color = self.weather_temperature_color(feels_like)
+        temp_text = (
+            f"{temp_color}{bold}{temp_value}°C{reset}" if temperature is not None else f"{gray}n/a{reset}"
+        )
+        feel_text = f"{feel_color}{feel_value}°C{reset}" if feels_like is not None else f"{gray}n/a{reset}"
+        humidity_text = f"{blue}{humidity_value}%{reset}" if humidity is not None else f"{gray}n/a{reset}"
+        wind_text = f"{orange}{wind_value} km/h{reset}" if wind_speed is not None else f"{gray}n/a{reset}"
+        direction_text = self.format_weather_wind_direction(wind_direction, direction_value)
+        condition_text = f"{bold}{condition}{reset}"
+        feels_like_label = "gef\u00fchlt" if self.config.language == "de" else "feels like"
+
+        details = [
+            f"{green}Temp:{reset} {temp_text}",
+            f"{green}{feels_like_label}:{reset} {feel_text}",
+            f"{green}{self.tr('humidity')}:{reset} {humidity_text}",
+            f"{green}{self.tr('wind')}:{reset} {wind_text} {direction_text}",
+        ]
 
         return (
-            f"{bold}{self.tr('weather_cc', location=display_place)}{reset}: {temp_text}, {condition}, "
-            f"{('gefühlt' if self.config.language == 'de' else 'feels like')} {feel_text}, "
-            f"{self.tr('humidity')} {humidity_text}, {self.tr('precipitation')} {precipitation_text}, "
-            f"{self.tr('wind')} {wind_text} ({direction_text})"
+            f"{bold}{red}{self.tr('weather_cc', location=display_place)}{reset} :: "
+            f"{condition_text} ({' | '.join(details)})"
         )
+
+    def weather_temperature_color(self, value: object) -> str:
+        numeric_value = self.safe_float(value)
+        if numeric_value is None:
+            return "\x0314"
+        if numeric_value < 0:
+            return "\x0312"
+        if numeric_value < 20:
+            return "\x0303"
+        if numeric_value < 30:
+            return "\x0307"
+        return "\x0304"
+
+    def format_weather_wind_direction(self, wind_direction: object, direction_value: str) -> str:
+        gray = "\x0314"
+        if wind_direction is None:
+            return f"{gray}(n/a){'\x0f'}"
+
+        numeric_direction = self.safe_float(wind_direction)
+        if numeric_direction is None:
+            return f"{gray}(n/a){'\x0f'}"
+
+        arrows = ("N", "NO", "O", "SO", "S", "SW", "W", "NW") if self.config.language == "de" else (
+            "N",
+            "NE",
+            "E",
+            "SE",
+            "S",
+            "SW",
+            "W",
+            "NW",
+        )
+        index = int((numeric_direction + 22.5) // 45) % 8
+        cardinal = arrows[index]
+        return f"{gray}({direction_value}° {cardinal}){'\x0f'}"
 
     def fetch_json(self, url: str) -> dict[str, object] | None:
         try:
