@@ -389,7 +389,7 @@ Examples:
   - Views / likes / comments (if available)
 
 ## Weather Behavior
-- Uses the legacy OpenWeatherMap lookup flow from the backup jar.
+- Uses the OpenWeatherMap lookup flow.
 - Supports city names as well as postal code queries like `12345` or `12345,de`.
 - Uses `weather_appid` from config; this is the OpenWeatherMap API key/app id you get from your OpenWeatherMap account.
 - Weather lookups fail with a clear message if it is missing.
