@@ -57,7 +57,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
   - Fetches HTML title / first heading topic
   - Filters common spam patterns
   - Flags blocked/dead links in database
-- Weather command using Open-Meteo (no API key required)
+- Weather command using the OpenWeatherMap-style lookup
 - Postal code fallback (German ZIP code lookup)
 - Optional YouTube link parsing via YouTube Data API
 - German/English output (`language: "de"` or `"en"`)
@@ -222,6 +222,7 @@ Setup paths:
   - Define `networks` (required) and set per-network values (`server`, `port`, `use_tls`, `nick`, `channels`, ...)
   - Top-level values act as defaults for all entries in `networks`
   - Database settings: `mysql_host`, `mysql_port`, `mysql_user`, `mysql_password`, `mysql_database`
+  - Required for weather lookups: `weather_appid` from your OpenWeatherMap account/API keys page
   - Optional: `weather_default_location`, `youtube_api_key`, `language`, `enabled_plugins`, `disabled_plugins`, `raw_chat_logging_enabled`, `flood_protection_enabled`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
 
 Flood/spam delay behavior:
@@ -388,10 +389,12 @@ Examples:
   - Views / likes / comments (if available)
 
 ## Weather Behavior
-- Uses Open-Meteo geocoding + forecast API.
-- Supports German postal code lookup fallback.
+- Uses the legacy OpenWeatherMap lookup flow from the backup jar.
+- Supports city names as well as postal code queries like `12345` or `12345,de`.
+- Uses `weather_appid` from config; this is the OpenWeatherMap API key/app id you get from your OpenWeatherMap account.
+- Weather lookups fail with a clear message if it is missing.
 - Place names and decimal formatting follow the configured bot language (`de`/`en`).
-- Returns temperature, "feels like", humidity, precipitation, and wind.
+- Returns temperature, "feels like", humidity, precipitation, and wind when the API provides them.
 - In channels without mode `+c`, the bot can use IRC control codes (bold/color) for richer output.
 
 ## Database Setup

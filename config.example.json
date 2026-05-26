@@ -72,6 +72,7 @@
   "mysql_password": "",
   "mysql_database": "nullbot",
   "weather_default_location": "",
+  "weather_appid": "<your-openweather-appid>",
   "youtube_api_key": "",
   "enabled_plugins": [],
   "disabled_plugins": [],

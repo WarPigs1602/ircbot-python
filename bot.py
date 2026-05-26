@@ -194,6 +194,7 @@ class BotConfig:
     mysql_password: str = ""
     mysql_database: str = "nullbot"
     weather_default_location: str = ""
+    weather_appid: str = ""
     youtube_api_key: str = ""
     perform: list[str] | None = None
     sasl_enabled: bool = False
@@ -266,6 +267,7 @@ class BotConfig:
             mysql_password=str(raw.get("mysql_password", "")),
             mysql_database=str(raw.get("mysql_database", "nullbot")),
             weather_default_location=str(raw.get("weather_default_location", "")),
+            weather_appid=str(raw.get("weather_appid", "")).strip(),
             youtube_api_key=str(raw.get("youtube_api_key", "")),
             perform=perform_list,
             sasl_enabled=bool(raw.get("sasl_enabled", False)),
@@ -400,6 +402,7 @@ class IRCBot:
                 "admin_bootstrap_prompt": "Erststart für {network}: initialen Admin anlegen.",
                 "admin_bootstrap_created": "Initialer Admin {mask} wurde für Netzwerk {network} angelegt.",
                 "admin_bootstrap_skipped": "Admin-Bootstrap übersprungen. Ohne Admin sind keine Verwaltungsbefehle verfügbar.",
+                "weather_appid_missing": "Weather-App-ID fehlt. Bitte weather_appid in der Konfiguration setzen.",
                 "config_missing": "config.json fehlt. Kopiere config.example.json zu config.json und passe die Werte an.",
                 "connecting": "Verbinde zu {server}:{port} (TLS={tls}) ...",
                 "connection_closed": "Verbindung beendet.",
@@ -420,6 +423,7 @@ class IRCBot:
                 "admin_bootstrap_prompt": "First run for {network}: create the initial admin.",
                 "admin_bootstrap_created": "Initial admin {mask} was created for network {network}.",
                 "admin_bootstrap_skipped": "Admin bootstrap skipped. No administrative commands will be available until an admin is created.",
+                "weather_appid_missing": "Weather app ID is missing. Please set weather_appid in the configuration.",
                 "config_missing": "config.json is missing. Copy config.example.json to config.json and adjust values.",
                 "connecting": "Connecting to {server}:{port} (TLS={tls}) ...",
                 "connection_closed": "Connection closed.",
@@ -1422,53 +1426,44 @@ class IRCBot:
         return target_nick
 
     def get_weather_text(self, location_query: str, command_prefix: str, reply_target: str) -> str:
-        from plugins.weather.plugin import WEATHER_CODE_MAPS
-
         location = location_query.strip() or self.config.weather_default_location.strip()
         if not location:
             return self.tr("usage_weather", prefix=command_prefix, command=self.primary_command_name("weather"))
+        return self.render_openweather_weather_text(location, reply_target)
 
-        place = self.resolve_weather_location(location)
-        if not place:
+    def render_openweather_weather_text(self, location: str, reply_target: str) -> str:
+        if not self.config.weather_appid.strip():
+            return self.tr("weather_appid_missing")
+
+        weather_url = self.build_openweather_url(location)
+        if weather_url is None:
             return self.tr("weather_not_found", location=location)
 
-        latitude = place.get("latitude")
-        longitude = place.get("longitude")
-        if latitude is None or longitude is None:
-            return self.tr("weather_not_found", location=location)
-
-        forecast_url = (
-            "https://api.open-meteo.com/v1/forecast?"
-            f"latitude={latitude}&longitude={longitude}"
-            "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,precipitation,wind_speed_10m,wind_direction_10m,is_day"
-            "&timezone=auto"
-        )
-
-        weather_data = self.fetch_json(forecast_url)
+        weather_data, weather_status = self.fetch_json_with_status(weather_url)
         if not weather_data:
-            return self.tr("weather_unreachable", location=location)
+            return self.openweather_error_text(weather_status, location)
 
-        current = weather_data.get("current") or {}
-        temperature = current.get("temperature_2m")
-        feels_like = current.get("apparent_temperature")
-        humidity = current.get("relative_humidity_2m")
-        weather_code = current.get("weather_code")
-        precipitation = current.get("precipitation")
-        wind_speed = current.get("wind_speed_10m")
-        wind_direction = current.get("wind_direction_10m")
-        weather_map = WEATHER_CODE_MAPS.get(self.config.language, WEATHER_CODE_MAPS["de"])
-        condition = weather_map.get(int(weather_code), f"Code {weather_code}") if weather_code is not None else self.tr("unknown")
+        if str(weather_data.get("cod", "")).strip() == "404":
+            return self.tr("weather_not_found", location=location)
+
+        weather_details = self.extract_openweather_weather_details(weather_data, location)
+        if weather_details is None:
+            return self.tr("weather_not_found", location=location)
+
+        display_place = str(weather_details["display_place"])
+        condition = str(weather_details["condition"])
+        temperature = weather_details["temperature"]
+        feels_like = weather_details["feels_like"]
+        humidity = weather_details["humidity"]
+        precipitation = weather_details["precipitation"]
+        wind_speed = weather_details["wind_speed"]
+        wind_direction = weather_details["wind_direction"]
+
         temperature_text = self.format_localized_number(temperature)
         feels_like_text = self.format_localized_number(feels_like)
         humidity_text = self.format_localized_number(humidity)
         precipitation_text = self.format_localized_number(precipitation)
         wind_speed_text = self.format_localized_number(wind_speed)
-
-        place_name = place.get("name", location)
-        admin1 = place.get("admin1")
-        country = place.get("country")
-        place_parts = [str(part) for part in (place_name, admin1, country) if part]
-        display_place = ", ".join(place_parts)
 
         if self.allows_control_codes(reply_target):
             return self.format_weather_with_control_codes(
@@ -1504,6 +1499,105 @@ class IRCBot:
                 return postal_location
 
         return self.geocode_location_name(location)
+
+    def build_openweather_url(self, location: str) -> str | None:
+        parsed_location = self.parse_openweather_location(location)
+        if parsed_location is None:
+            return None
+
+        query_location, zip_location = parsed_location
+
+        url = (
+            "https://api.openweathermap.org/data/2.5/weather?"
+            f"q={quote_plus(query_location)}"
+            f"&appid={quote_plus(self.config.weather_appid)}"
+            "&units=metric"
+            f"&lang={quote_plus(self.config.language)}"
+        )
+        if zip_location is not None:
+            url += f"&zip={quote_plus(zip_location)}"
+        return url
+
+    def parse_openweather_location(self, location: str) -> tuple[str, str | None] | None:
+        weather_location = location.strip()
+        if not weather_location:
+            return None
+
+        if "," in weather_location:
+            zip_code = weather_location.split(",", 1)[0].strip()
+            if not self.is_integer_text(zip_code):
+                return weather_location, None
+            return "", weather_location
+
+        if not self.is_integer_text(weather_location):
+            return weather_location, None
+        return "", f"{weather_location},de"
+
+    @staticmethod
+    def is_integer_text(value: str) -> bool:
+        return bool(re.fullmatch(r"\d+", value.strip()))
+
+    def extract_openweather_weather_details(self, weather_data: dict[str, object], fallback_location: str) -> dict[str, object] | None:
+        if not isinstance(weather_data, dict):
+            return None
+
+        return {
+            "display_place": self.openweather_display_place(weather_data, fallback_location),
+            "condition": self.openweather_condition(weather_data),
+            "temperature": self.openweather_main_value(weather_data, "temp"),
+            "feels_like": self.openweather_main_value(weather_data, "feels_like"),
+            "humidity": self.openweather_main_value(weather_data, "humidity"),
+            "precipitation": self.openweather_precipitation(weather_data),
+            "wind_speed": self.openweather_wind_speed(weather_data),
+            "wind_direction": self.openweather_wind_direction(weather_data),
+        }
+
+    @staticmethod
+    def dict_or_empty(value: object) -> dict[str, object]:
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def list_or_empty(value: object) -> list[object]:
+        return value if isinstance(value, list) else []
+
+    def openweather_display_place(self, weather_data: dict[str, object], fallback_location: str) -> str:
+        place_name = str(weather_data.get("name", "")).strip() or fallback_location
+        country = str(self.dict_or_empty(weather_data.get("sys")).get("country", "")).strip()
+        return ", ".join(part for part in (place_name, country) if part)
+
+    def openweather_condition(self, weather_data: dict[str, object]) -> str:
+        weather_list = self.list_or_empty(weather_data.get("weather"))
+        first_weather = weather_list[0] if weather_list and isinstance(weather_list[0], dict) else {}
+        return str(first_weather.get("description", "")).strip() or self.tr("unknown")
+
+    def openweather_main_value(self, weather_data: dict[str, object], key: str) -> object:
+        return self.dict_or_empty(weather_data.get("main")).get(key)
+
+    def openweather_precipitation(self, weather_data: dict[str, object]) -> object:
+        rain_dict = self.dict_or_empty(weather_data.get("rain"))
+        snow_dict = self.dict_or_empty(weather_data.get("snow"))
+
+        precipitation = rain_dict.get("1h")
+        if precipitation is None:
+            precipitation = rain_dict.get("3h")
+        if precipitation is None:
+            precipitation = snow_dict.get("1h")
+        if precipitation is None:
+            precipitation = snow_dict.get("3h")
+        return precipitation
+
+    def openweather_wind_speed(self, weather_data: dict[str, object]) -> object:
+        wind_speed_value = self.dict_or_empty(weather_data.get("wind")).get("speed")
+        speed = self.safe_float(wind_speed_value)
+        return speed * 3.6 if speed is not None else None
+
+    def openweather_wind_direction(self, weather_data: dict[str, object]) -> object:
+        return self.dict_or_empty(weather_data.get("wind")).get("deg")
+
+    def openweather_error_text(self, status: int | None, location: str) -> str:
+        if status is not None and 400 <= status < 500:
+            return self.tr("weather_not_found", location=location)
+        return self.tr("weather_unreachable", location=location)
 
     def geocode_postal_code(self, postal_code: str, location: str) -> dict[str, object] | None:
         zip_result = self._geocode_postal_code_zippopotam(postal_code)
@@ -1666,6 +1760,26 @@ class IRCBot:
             return parsed
         except (OSError, ValueError):
             return None
+
+    def fetch_json_with_status(self, url: str) -> tuple[dict[str, object] | None, int | None]:
+        try:
+            request = Request(url, headers={"User-Agent": "Mozilla/5.0 IRCBot"})
+            with urlopen(request, timeout=10) as response:
+                payload = response.read()
+                status = getattr(response, "status", None)
+            decoded = payload.decode("utf-8", errors="replace")
+            parsed = json.loads(decoded)
+            return parsed, status
+        except HTTPError as exc:
+            try:
+                payload = exc.read()
+                decoded = payload.decode("utf-8", errors="replace")
+                parsed = json.loads(decoded)
+            except Exception:
+                parsed = None
+            return parsed, exc.code
+        except (OSError, ValueError):
+            return None, None
 
     def format_iso8601_duration(self, duration: str) -> str:
         match = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration)
