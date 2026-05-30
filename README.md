@@ -57,6 +57,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
   - Fetches HTML title / first heading topic
   - Filters common spam patterns
   - Flags blocked/dead links in database
+- RSS/Atom feed reader via `!rss <feed|url>` with optional configured feed aliases
 - Weather command using the OpenWeatherMap-style lookup
 - Postal code fallback (German ZIP code lookup)
 - Optional YouTube link parsing via YouTube Data API
@@ -82,6 +83,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
 - `darttop10` — Displays the top 10 dart players
 - `mydartstats` — Shows your personal dart statistics (sent as NOTICE)
 - `weather <location|plz>` — Looks up weather forecast using postal code or location name
+- `rss <feed|url>` — Reads the latest entry from a configured RSS/Atom feed alias or a direct feed URL
 - `url <id>` — Retrieves a stored URL from the database
 - `randomurl` — Retrieves a random URL from the database
 - `admin` — Provides administrative PM commands (user management, roles, channel modes, raw IRC commands)
@@ -322,6 +324,7 @@ The following commands are available when the corresponding plugins are enabled:
 - `!darttop10`
 - `!mydartstats` / `!meinedartstats`
 - `!weather <location>` / `!wetter <ort|plz>`
+- `!rss <feed|url>`
 - `!url <id>`
 - `!randomurl` / `!zufallsurl`
 
@@ -337,6 +340,7 @@ Notes:
 - If `!dart` has no argument, the caller nickname is used.
 - `!lag` measures latency in nanoseconds and displays a readable millisecond value (for sub-millisecond latency as decimal, e.g. `0.123 ms`) plus raw `ns` in parentheses.
 - If `weather_default_location` is set, weather can be requested without arguments.
+- If `rss_feeds` contains aliases, `!rss` without arguments shows the available feed names.
 
 Trigger plugins:
 - `unreal`: replies with an action when a message contains `unreal`
@@ -427,6 +431,9 @@ See `config.example.json` for all available options, including:
   - `raw_chat_logging_enabled` enables per-network raw logs for all IRC lines
   - the bot creates a `log` directory automatically when needed
   - log files are written as `log/chat-<network_key>.log`
+  - top-level value acts as default; each network entry can override it
+- Optional RSS aliases:
+  - `rss_feeds` maps alias names to RSS/Atom feed URLs
   - top-level value acts as default; each network entry can override it
 
 ## License

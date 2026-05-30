@@ -218,6 +218,7 @@ class BotConfig:
     url_timeout_seconds: float = 3.0
     url_sniff_max_bytes: int = 65536
     url_max_content_length_bytes: int = 2097152
+    rss_feeds: dict[str, str] | None = None
     enabled_plugins: list[str] | None = None
     disabled_plugins: list[str] | None = None
     mondgesicht_url_enabled: bool = False
@@ -246,6 +247,18 @@ class BotConfig:
             if isinstance(value, list):
                 return [str(item) for item in value]
             return []
+
+        def _parse_string_dict(value: object) -> dict[str, str]:
+            if not isinstance(value, dict):
+                return {}
+
+            parsed: dict[str, str] = {}
+            for key, item in value.items():
+                normalized_key = str(key).strip()
+                normalized_value = str(item).strip()
+                if normalized_key and normalized_value:
+                    parsed[normalized_key] = normalized_value
+            return parsed
 
         configured_network_key = str(raw.get("network_key", "")).strip()
         network_key = configured_network_key or f"{server}:{port}:{nick}".lower()
@@ -291,6 +304,7 @@ class BotConfig:
             url_timeout_seconds=max(0.5, float(raw.get("url_timeout_seconds", 3.0))),
             url_sniff_max_bytes=max(1024, int(raw.get("url_sniff_max_bytes", 65536))),
             url_max_content_length_bytes=max(65536, int(raw.get("url_max_content_length_bytes", 2097152))),
+            rss_feeds=_parse_string_dict(raw.get("rss_feeds", {})),
             enabled_plugins=_parse_string_list(raw.get("enabled_plugins", [])),
             disabled_plugins=_parse_string_list(raw.get("disabled_plugins", [])),
             mondgesicht_url_enabled=bool(raw.get("mondgesicht_url_enabled", False)),

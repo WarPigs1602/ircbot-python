@@ -74,6 +74,9 @@
   "weather_default_location": "",
   "weather_appid": "<your-openweather-appid>",
   "youtube_api_key": "",
+  "rss_feeds": {
+    "midiandmore": "https://www.midiandmore.net/Community/news-rss.jsp"
+  },
   "enabled_plugins": [],
   "disabled_plugins": [],
   "raw_chat_logging_enabled": false,
