@@ -44,6 +44,15 @@ class _TopicParser(HTMLParser):
         elif self._capture_title:
             self._title_parts.append(data)
 
+    def close(self) -> None:
+        if self._capture_title and not self.title:
+            self.title = "".join(self._title_parts).strip()
+            self._capture_title = False
+        if self._capture_topic and not self.topic:
+            self.topic = "".join(self._topic_parts).strip()
+            self._capture_topic = False
+        super().close()
+
 
 class URLService:
     def sniff_urls_in_message(self, bot, message: str, channel: str, source_nick: str) -> None:
@@ -113,6 +122,9 @@ class URLService:
             return
 
         if not topic:
+            if title_missing:
+                bot.send_privmsg(reply_target, f"{id_prefix}{bot.tr('url_without_title_no_topic', url=url)} ({actor_context}){max_id_suffix}")
+                return
             bot.send_privmsg(reply_target, f"{id_prefix}{bot.tr('url_no_html_topic', url=url)}{max_id_suffix}")
             return
         if title_missing:
@@ -407,7 +419,7 @@ class URLService:
 
                 raw_bytes = response.read(max_sniff_bytes + 1)
                 if len(raw_bytes) > max_sniff_bytes:
-                    return {"status": "too_large", "url": url}
+                    raw_bytes = raw_bytes[:max_sniff_bytes]
 
                 encoding = response_headers.get_content_charset() or "utf-8"
                 html_text = raw_bytes.decode(encoding, errors="replace")
@@ -419,8 +431,7 @@ class URLService:
 
         topic, title_missing = self.extract_html_topic(html_text)
         if not topic:
-            bot.mark_deadlink(url)
-            return {"status": "deadlink", "url": url}
+            return {"status": "ok", "url": url, "topic": "", "title_missing": title_missing}
 
         if self.is_spammy(bot, topic):
             bot.block_url(url)
@@ -481,9 +492,15 @@ class URLService:
         parser.feed(html_text)
         parser.close()
         topic = parser.topic or parser.title
+        fallback_tag = ""
+        if not topic:
+            fallback_match = re.search(r"<(?P<tag>h1|h2|title)\b[^>]*>(.*?)(?:</(?:h1|h2|title)>|$)", html_text, re.IGNORECASE | re.DOTALL)
+            if fallback_match:
+                fallback_tag = str(fallback_match.group("tag")).lower()
+                topic = re.sub(r"<[^>]+>", " ", fallback_match.group(2))
         topic = unescape(topic).strip()
         topic = re.sub(r"\s+", " ", topic)
-        title_missing = not bool(parser.title)
+        title_missing = not (bool(parser.title) or fallback_tag == "title")
         return topic[:180], title_missing
 
     def is_spammy(self, bot, text: str) -> bool:
