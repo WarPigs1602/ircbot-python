@@ -21,6 +21,11 @@ MESSAGES = {
         "admin_help_modes_3": "usermode <ident@host> <#channel> <modus> setzt eine benutzerspezifische Ausnahme.",
         "admin_help_modes_4": "usermode-del <ident@host> <#channel> <modus> entfernt diese Benutzer-Ausnahme.",
         "admin_help_modes_5": "apply <nick> <#channel> <ident@host> wendet die gespeicherten Modi sofort an.",
+        "admin_help_rss_1": "rssannounce zeigt den aktuellen RSS-Ankuendigungs-Channel.",
+        "admin_help_rss_2": "rssannounce <#channel[,#channel...]> setzt einen oder mehrere RSS-Ankuendigungs-Channels.",
+        "admin_help_rss_3": "rssannounce +<#channel[,#channel...]> fuegt Channels zur bestehenden Liste hinzu.",
+        "admin_help_rss_4": "rssannounce -<#channel[,#channel...]> entfernt Channels einzeln aus der bestehenden Liste.",
+        "admin_help_rss_5": "rssannounce off deaktiviert automatische RSS-Ankuendigungen.",
         "admin_help_mg_1": "mgadd [de|en] <punkt|komma|strich> speichert einen neuen Mondgesicht-Text.",
         "admin_help_mg_2": "mglist [de|en] [punkt|komma|strich] listet gespeicherte Mondgesicht-Texte auf.",
         "admin_help_mg_3": "mgdel <id> löscht einen Mondgesicht-Text per ID.",
@@ -54,10 +59,20 @@ MESSAGES = {
         "admin_usage_rolemode": "Nutzung: rolemode <rolle> <#channel> <modus>",
         "admin_usage_usermode": "Nutzung: usermode <ident@host> <#channel> <modus>",
         "admin_usage_apply": "Nutzung: apply <nick> <#channel> <ident@host>",
+        "admin_usage_rssannounce": "Nutzung: rssannounce [#channel[,#channel...]|+#channel[,#channel...]|-#channel[,#channel...]|off]",
         "admin_unknown": "Unbekannter Admin-Unterbefehl. help zeigt die Übersicht.",
         "admin_help_unknown": "Unbekanntes Hilfethema. Erlaubt: {topics}.",
         "admin_roles_empty": "Keine Rollen konfiguriert.",
         "admin_users_empty": "Keine Benutzer konfiguriert.",
+        "admin_rssannounce_current": "RSS-Ankuendigungs-Channels: {channels}",
+        "admin_rssannounce_disabled": "RSS-Ankuendigungen sind deaktiviert.",
+        "admin_rssannounce_set": "RSS-Ankuendigungs-Channels gesetzt auf {channels}.",
+        "admin_rssannounce_cleared": "RSS-Ankuendigungs-Channel deaktiviert.",
+        "admin_rssannounce_feeds": "Konfigurierte RSS-Feeds: {feeds}",
+        "admin_rssannounce_feeds_none": "Keine RSS-Feeds konfiguriert.",
+        "admin_rssannounce_feeds_channel": "RSS-Feeds fuer diesen Channel: {feeds}",
+        "admin_rssannounce_invalid": "Ungueltiger Channel. Erwarte #channel oder #channel,#channel oder +#channel oder -#channel oder off.",
+        "admin_rssannounce_save_failed": "RSS-Ankuendigungs-Channel konnte nicht gespeichert werden: {error}",
         "admin_whoami": "Du bist {mask} mit Rolle {role} (admin={admin}, raw={raw}).",
         "admin_raw_usage": "Nutzung: raw <IRC-RAW-Zeile>",
         "admin_raw_sent": "RAW gesendet.",
@@ -81,6 +96,11 @@ MESSAGES = {
         "admin_help_modes_3": "usermode <ident@host> <#channel> <mode> creates a user-specific override.",
         "admin_help_modes_4": "usermode-del <ident@host> <#channel> <mode> removes that user override.",
         "admin_help_modes_5": "apply <nick> <#channel> <ident@host> applies the stored modes immediately.",
+        "admin_help_rss_1": "rssannounce shows the current RSS announce channel.",
+        "admin_help_rss_2": "rssannounce <#channel[,#channel...]> sets one or multiple RSS announce channels.",
+        "admin_help_rss_3": "rssannounce +<#channel[,#channel...]> adds channels to the current list.",
+        "admin_help_rss_4": "rssannounce -<#channel[,#channel...]> removes channels individually from the current list.",
+        "admin_help_rss_5": "rssannounce off disables automatic RSS announcements.",
         "admin_help_mg_1": "mgadd [de|en] <point|comma|stroke> stores a new Moonface text.",
         "admin_help_mg_2": "mglist [de|en] [point|comma|stroke] lists stored Moonface texts.",
         "admin_help_mg_3": "mgdel <id> deletes a Moonface text by ID.",
@@ -114,10 +134,20 @@ MESSAGES = {
         "admin_usage_rolemode": "Usage: rolemode <role> <#channel> <mode>",
         "admin_usage_usermode": "Usage: usermode <ident@host> <#channel> <mode>",
         "admin_usage_apply": "Usage: apply <nick> <#channel> <ident@host>",
+        "admin_usage_rssannounce": "Usage: rssannounce [#channel[,#channel...]|+#channel[,#channel...]|-#channel[,#channel...]|off]",
         "admin_unknown": "Unknown admin subcommand. help shows the overview.",
         "admin_help_unknown": "Unknown help topic. Allowed: {topics}.",
         "admin_roles_empty": "No roles configured.",
         "admin_users_empty": "No users configured.",
+        "admin_rssannounce_current": "RSS announce channels: {channels}",
+        "admin_rssannounce_disabled": "RSS announcements are disabled.",
+        "admin_rssannounce_set": "RSS announce channels set to {channels}.",
+        "admin_rssannounce_cleared": "RSS announce channel disabled.",
+        "admin_rssannounce_feeds": "Configured RSS feeds: {feeds}",
+        "admin_rssannounce_feeds_none": "No RSS feeds configured.",
+        "admin_rssannounce_feeds_channel": "RSS feeds for this channel: {feeds}",
+        "admin_rssannounce_invalid": "Invalid channel. Expected #channel or #channel,#channel or +#channel or -#channel or off.",
+        "admin_rssannounce_save_failed": "Could not save RSS announce channel: {error}",
         "admin_whoami": "You are {mask} with role {role} (admin={admin}, raw={raw}).",
         "admin_raw_usage": "Usage: raw <IRC raw line>",
         "admin_raw_sent": "RAW sent.",
@@ -132,7 +162,7 @@ def has_mg_admin_help(bot) -> bool:
 
 
 def admin_help_topics(bot) -> str:
-    topics = ["auth", "users", "roles", "modes"]
+    topics = ["auth", "users", "roles", "modes", "rss"]
     if has_mg_admin_help(bot):
         topics.append("mg")
     topics.append("raw")
@@ -180,6 +210,11 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
             "admin_help_modes_3",
             "admin_help_modes_4",
             "admin_help_modes_5",
+            "admin_help_rss_1",
+            "admin_help_rss_2",
+            "admin_help_rss_3",
+            "admin_help_rss_4",
+            "admin_help_rss_5",
             "admin_help_raw_1",
             "admin_help_raw_2",
             "admin_help_caps",
@@ -194,6 +229,13 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
             "admin_help_modes_3",
             "admin_help_modes_4",
             "admin_help_modes_5",
+        ),
+        "rss": (
+            "admin_help_rss_1",
+            "admin_help_rss_2",
+            "admin_help_rss_3",
+            "admin_help_rss_4",
+            "admin_help_rss_5",
         ),
         "raw": ("admin_help_raw_1", "admin_help_raw_2"),
         "cap": ("admin_help_caps",),
@@ -349,6 +391,8 @@ def is_prefixed_admin_message(context) -> bool:
         "usermode",
         "usermode-del",
         "apply",
+        "rssannounce",
+        "rsschannel",
         "raw",
         "caps",
         "reloadplugins",
@@ -388,6 +432,8 @@ def parse_pm_admin_message(message: str) -> tuple[str, str] | None:
         "usermode",
         "usermode-del",
         "apply",
+        "rssannounce",
+        "rsschannel",
         "raw",
         "caps",
         "reloadplugins",
@@ -559,22 +605,204 @@ def handle_admin_mode_command(bot, context, parts: list[str]) -> bool:
     return False
 
 
-def handle_admin_authenticated(bot, context, parts: list[str], source_mask: str, admin_row) -> bool:
-    subcommand = parts[0].lower()
+def parse_rssannounce_channels_arg(requested: str) -> tuple[str, list[str] | None, bool]:
+    stripped = requested.strip()
+    lowered = stripped.lower()
+    if lowered in {"off", "none", "-"}:
+        return "off", [], True
 
-    if subcommand == "whoami":
+    mode = "set"
+    payload = stripped
+    if stripped.startswith("+"):
+        mode = "add"
+        payload = stripped[1:].strip()
+    elif stripped.startswith("-"):
+        mode = "remove"
+        payload = stripped[1:].strip()
+
+    if not payload:
+        return mode, None, False
+
+    channels: list[str] = []
+    for token in payload.replace(";", ",").split(","):
+        channel = token.strip()
+        if not channel:
+            continue
+        if not channel.startswith("#"):
+            return mode, None, False
+        normalized = channel.lower()
+        if normalized not in channels:
+            channels.append(normalized)
+
+    return mode, channels if channels else None, bool(channels)
+
+
+def current_rssannounce_channels(bot) -> list[str]:
+    return [str(channel).strip().lower() for channel in (bot.get_rss_announce_channels() or ()) if str(channel).strip()]
+
+
+def target_rssannounce_channels(bot, mode: str, parsed_channels: list[str]) -> list[str]:
+    if mode == "set" or mode == "off":
+        return parsed_channels
+
+    current = current_rssannounce_channels(bot)
+    if mode == "add":
+        for channel in parsed_channels:
+            if channel not in current:
+                current.append(channel)
+        return current
+
+    blocked = set(parsed_channels)
+    return [channel for channel in current if channel not in blocked]
+
+
+def reply_rssannounce_current(bot, context) -> None:
+    channels = tuple(current_rssannounce_channels(bot))
+    if channels:
+        reply(bot, context, bot.tr("admin_rssannounce_current", channels=", ".join(channels)))
+        return
+    reply(bot, context, bot.tr("admin_rssannounce_disabled"))
+
+
+def reply_rssannounce_invalid(bot, context) -> None:
+    reply(bot, context, bot.tr("admin_rssannounce_invalid"))
+    reply_admin_usage(bot, context, "admin_usage_rssannounce")
+
+
+def reply_rssannounce_feeds(bot, context) -> None:
+    configured_feeds = dict(getattr(bot.config, "rss_feeds", {}) or {})
+    if not configured_feeds:
+        reply(bot, context, bot.tr("admin_rssannounce_feeds_none"))
+        return
+
+    rendered = ", ".join(sorted((str(alias).strip() for alias in configured_feeds.keys() if str(alias).strip()), key=str.lower))
+    if not rendered:
+        reply(bot, context, bot.tr("admin_rssannounce_feeds_none"))
+        return
+    reply(bot, context, bot.tr("admin_rssannounce_feeds", feeds=rendered))
+
+
+def announce_rss_feeds_in_channels(bot, channels: list[str]) -> None:
+    configured_feeds = dict(getattr(bot.config, "rss_feeds", {}) or {})
+    if not configured_feeds:
+        return
+
+    rendered = ", ".join(sorted((str(alias).strip() for alias in configured_feeds.keys() if str(alias).strip()), key=str.lower))
+    if not rendered:
+        return
+
+    message = bot.tr("admin_rssannounce_feeds_channel", feeds=rendered)
+    latest_messages = build_latest_feed_messages(bot, configured_feeds)
+    for channel in channels:
+        normalized = str(channel).strip().lower()
+        if not normalized.startswith("#"):
+            continue
+        bot.send_privmsg(normalized, message)
+        for latest_message in latest_messages:
+            bot.send_privmsg(normalized, latest_message)
+
+
+def build_latest_feed_messages(bot, configured_feeds: dict[str, str]) -> list[str]:
+    try:
+        from plugins.rss.plugin import FeedEntry, fetch_latest_entry, render_feed_reply
+    except Exception:
+        return []
+
+    timeout_seconds = float(getattr(bot.config, "url_timeout_seconds", 3.0))
+    latest_messages: list[str] = []
+
+    for feed_alias, feed_url in sorted(configured_feeds.items(), key=lambda item: str(item[0]).lower()):
+        target_url = str(feed_url).strip()
+        if not target_url.lower().startswith(("http://", "https://")):
+            continue
+
+        result = fetch_latest_entry(target_url, timeout_seconds=timeout_seconds)
+        entry = result.get("entry")
+        if str(result.get("status", "")) != "ok" or not isinstance(entry, FeedEntry):
+            continue
+
+        display_name = entry.feed_title or str(feed_alias)
+        latest_messages.append(render_feed_reply(bot, display_name, entry.entry_title, entry.entry_link))
+
+    return latest_messages
+
+
+def handle_admin_rss_command(bot, context, parts: list[str]) -> bool:
+    subcommand = parts[0].lower()
+    if subcommand not in {"rssannounce", "rsschannel"}:
+        return False
+
+    if len(parts) > 2:
+        reply_admin_usage(bot, context, "admin_usage_rssannounce")
+        return True
+
+    if len(parts) == 1:
+        reply_rssannounce_current(bot, context)
+        return True
+
+    mode, parsed_channels, valid = parse_rssannounce_channels_arg(parts[1])
+    if not valid or parsed_channels is None:
+        reply_rssannounce_invalid(bot, context)
+        return True
+
+    target_channels = target_rssannounce_channels(bot, mode, parsed_channels)
+
+    ok, error = bot.set_rss_announce_channels(target_channels)
+    if not ok:
+        reply(bot, context, bot.tr("admin_rssannounce_save_failed", error=error))
+        return True
+
+    if target_channels:
+        reply(bot, context, bot.tr("admin_rssannounce_set", channels=", ".join(target_channels)))
+        announce_rss_feeds_in_channels(bot, target_channels)
+    else:
+        reply(bot, context, bot.tr("admin_rssannounce_cleared"))
+    reply_rssannounce_feeds(bot, context)
+    return True
+
+
+def handle_admin_whoami(bot, context, source_mask: str, admin_row) -> bool:
+    reply(
+        bot,
+        context,
+        bot.tr(
+            "admin_whoami",
+            mask=source_mask,
+            role=str(admin_row.get("role_name", "?")),
+            admin="on" if int(admin_row.get("is_admin", 0)) else "off",
+            raw="on" if int(admin_row.get("can_raw", 0)) else "off",
+        ),
+    )
+    return True
+
+
+def handle_admin_caps(bot, context) -> bool:
+    active_caps = sorted(str(cap).strip() for cap in getattr(bot, "active_capabilities", set()) if str(cap).strip())
+    if active_caps:
+        reply(bot, context, bot.tr("admin_caps_enabled", caps=", ".join(active_caps)))
+    else:
+        reply(bot, context, bot.tr("admin_caps_none"))
+    return True
+
+
+def handle_admin_reloadplugins(bot, context) -> bool:
+    try:
+        bot.plugin_manager.reload_plugins()
+        loaded_plugins = bot.plugin_manager.loaded_plugins
+        rendered_plugins = ", ".join(loaded_plugins) if loaded_plugins else "-"
         reply(
             bot,
             context,
-            bot.tr(
-                "admin_whoami",
-                mask=source_mask,
-                role=str(admin_row.get("role_name", "?")),
-                admin="on" if int(admin_row.get("is_admin", 0)) else "off",
-                raw="on" if int(admin_row.get("can_raw", 0)) else "off",
-            ),
+            bot.tr("admin_reload_ok", count=len(loaded_plugins), plugins=rendered_plugins),
         )
-        return True
+    except Exception as exc:
+        reply(bot, context, bot.tr("admin_reload_failed", error=str(exc)))
+    return True
+
+
+def handle_admin_info_command(bot, context, subcommand: str, source_mask: str, admin_row) -> bool:
+    if subcommand == "whoami":
+        return handle_admin_whoami(bot, context, source_mask, admin_row)
 
     if subcommand == "listroles":
         reply(bot, context, render_roles(bot))
@@ -585,31 +813,24 @@ def handle_admin_authenticated(bot, context, parts: list[str], source_mask: str,
         return True
 
     if subcommand == "caps":
-        active_caps = sorted(str(cap).strip() for cap in getattr(bot, "active_capabilities", set()) if str(cap).strip())
-        if active_caps:
-            reply(bot, context, bot.tr("admin_caps_enabled", caps=", ".join(active_caps)))
-        else:
-            reply(bot, context, bot.tr("admin_caps_none"))
-        return True
+        return handle_admin_caps(bot, context)
 
     if subcommand == "reloadplugins":
-        try:
-            bot.plugin_manager.reload_plugins()
-            loaded_plugins = bot.plugin_manager.loaded_plugins
-            rendered_plugins = ", ".join(loaded_plugins) if loaded_plugins else "-"
-            reply(
-                bot,
-                context,
-                bot.tr("admin_reload_ok", count=len(loaded_plugins), plugins=rendered_plugins),
-            )
-        except Exception as exc:
-            reply(bot, context, bot.tr("admin_reload_failed", error=str(exc)))
+        return handle_admin_reloadplugins(bot, context)
+
+    return False
+
+
+def handle_admin_authenticated(bot, context, parts: list[str], source_mask: str, admin_row) -> bool:
+    subcommand = parts[0].lower()
+    if handle_admin_info_command(bot, context, subcommand, source_mask, admin_row):
         return True
 
     return (
         handle_admin_role_command(bot, context, parts)
         or handle_admin_user_command(bot, context, parts, source_mask)
         or handle_admin_mode_command(bot, context, parts)
+        or handle_admin_rss_command(bot, context, parts)
     )
 
 

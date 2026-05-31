@@ -168,7 +168,17 @@ ROLE_FLAG_COLUMNS = {
     "raw": "can_raw",
 }
 INVALID_HOSTMASK_MESSAGE = "Ungültige Hostmask."
+INVALID_CHANNEL_MESSAGE = "Ungültiger Channel."
 ROLE_EXISTS_QUERY = "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1"
+RSS_ANNOUNCE_CHANNELS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS bot_rss_announce_channels (
+    network VARCHAR(255) NOT NULL,
+    channel VARCHAR(128) NOT NULL,
+    updated_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (network, channel),
+    KEY idx_bot_rss_announce_channels_lookup (network, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
 CONFIG_FILE_NAME = "config.json"
 CONFIG_MISSING_MESSAGE = "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
 SASL_RESULT_COMMANDS = frozenset({"900", "902", "903", "904", "905", "906", "907", "908"})
@@ -219,6 +229,7 @@ class BotConfig:
     url_sniff_max_bytes: int = 65536
     url_max_content_length_bytes: int = 2097152
     rss_feeds: dict[str, str] | None = None
+    rss_announce_channel: str = ""
     enabled_plugins: list[str] | None = None
     disabled_plugins: list[str] | None = None
     mondgesicht_url_enabled: bool = False
@@ -305,6 +316,7 @@ class BotConfig:
             url_sniff_max_bytes=max(1024, int(raw.get("url_sniff_max_bytes", 65536))),
             url_max_content_length_bytes=max(65536, int(raw.get("url_max_content_length_bytes", 2097152))),
             rss_feeds=_parse_string_dict(raw.get("rss_feeds", {})),
+            rss_announce_channel=str(raw.get("rss_announce_channel", "")).strip(),
             enabled_plugins=_parse_string_list(raw.get("enabled_plugins", [])),
             disabled_plugins=_parse_string_list(raw.get("disabled_plugins", [])),
             mondgesicht_url_enabled=bool(raw.get("mondgesicht_url_enabled", False)),
@@ -2189,6 +2201,9 @@ class IRCBot:
                     """
                 )
                 cur.execute(
+                    RSS_ANNOUNCE_CHANNELS_TABLE_SQL
+                )
+                cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS bot_mondgesicht_channels (
                         network VARCHAR(255) NOT NULL,
@@ -2409,6 +2424,113 @@ class IRCBot:
             pass
         finally:
             conn.close()
+
+    def parse_rss_announce_channels(self, value: str) -> list[str]:
+        channels: list[str] = []
+        for token in value.replace(";", ",").split(","):
+            normalized = self.normalize_channel_name(token)
+            if normalized.startswith("#") and normalized not in channels:
+                channels.append(normalized)
+        return channels
+
+    def load_rss_announce_channels_from_cursor(self, cur) -> list[str]:
+        cur.execute(
+            "SELECT channel FROM bot_rss_announce_channels WHERE network = %s ORDER BY channel ASC",
+            (self.config.network_key,),
+        )
+        rows = cur.fetchall() or []
+
+        channels: list[str] = []
+        for row in rows:
+            channel = self.normalize_channel_name(str(row.get("channel", "")).strip())
+            if channel.startswith("#") and channel not in channels:
+                channels.append(channel)
+        return channels
+
+    def seed_rss_announce_channels(self, cur, channels: list[str]) -> None:
+        if not channels:
+            return
+        now = self.current_time_string()
+        for channel in channels:
+            cur.execute(
+                """
+                INSERT IGNORE INTO bot_rss_announce_channels (network, channel, updated_at)
+                VALUES (%s, %s, %s)
+                """,
+                (self.config.network_key, channel, now),
+            )
+
+    def get_rss_announce_channels(self) -> tuple[str, ...]:
+        configured = str(self.config.rss_announce_channel or "").strip()
+        fallback_channels = self.parse_rss_announce_channels(configured)
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return tuple(fallback_channels)
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(RSS_ANNOUNCE_CHANNELS_TABLE_SQL)
+                db_channels = self.load_rss_announce_channels_from_cursor(cur)
+                if db_channels:
+                    return tuple(db_channels)
+                self.seed_rss_announce_channels(cur, fallback_channels)
+        except Exception:
+            return tuple(fallback_channels)
+        finally:
+            conn.close()
+
+        return tuple(fallback_channels)
+
+    def get_rss_announce_channel(self) -> str:
+        channels = self.get_rss_announce_channels()
+        return channels[0] if channels else ""
+
+    def set_rss_announce_channels(self, channels: list[str]) -> tuple[bool, str]:
+        normalized_channels: list[str] = []
+        for channel in channels:
+            normalized = self.normalize_channel_name(channel)
+            if not normalized:
+                continue
+            if not normalized.startswith("#"):
+                return False, INVALID_CHANNEL_MESSAGE
+            if normalized not in normalized_channels:
+                normalized_channels.append(normalized)
+
+        conn = self.open_db_connection()
+        if conn is None:
+            return False, self.tr("db_connect_failed")
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(RSS_ANNOUNCE_CHANNELS_TABLE_SQL)
+                cur.execute(
+                    "DELETE FROM bot_rss_announce_channels WHERE network = %s",
+                    (self.config.network_key,),
+                )
+                if normalized_channels:
+                    now = self.current_time_string()
+                    for channel in normalized_channels:
+                        cur.execute(
+                            """
+                            INSERT INTO bot_rss_announce_channels (network, channel, updated_at)
+                            VALUES (%s, %s, %s)
+                            """,
+                            (self.config.network_key, channel, now),
+                        )
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            conn.close()
+
+    def set_rss_announce_channel(self, channel: str) -> tuple[bool, str]:
+        normalized_channel = self.normalize_channel_name(channel)
+        if not normalized_channel:
+            return self.set_rss_announce_channels([])
+        if not normalized_channel.startswith("#"):
+            return False, INVALID_CHANNEL_MESSAGE
+        return self.set_rss_announce_channels([normalized_channel])
 
     def ensure_mondgesicht_text_storage_utf8mb4(self, cur) -> None:
         db_name = self.config.mysql_database.replace("`", "``")

@@ -58,6 +58,7 @@ A Python IRC bot with reconnect logic, a plugin-based command and trigger system
   - Filters common spam patterns
   - Flags blocked/dead links in database
 - RSS/Atom feed reader via `!rss <feed|url>` with optional configured feed aliases
+- Optional RSS auto-posting every 10 minutes for new feed entries to a DB-configured channel (`rssannounce` admin command)
 - Weather command using the OpenWeatherMap-style lookup
 - Postal code fallback (German ZIP code lookup)
 - Optional YouTube link parsing via YouTube Data API
@@ -225,7 +226,7 @@ Setup paths:
   - Top-level values act as defaults for all entries in `networks`
   - Database settings: `mysql_host`, `mysql_port`, `mysql_user`, `mysql_password`, `mysql_database`
   - Required for weather lookups: `weather_appid` from your OpenWeatherMap account/API keys page
-  - Optional: `weather_default_location`, `youtube_api_key`, `language`, `enabled_plugins`, `disabled_plugins`, `raw_chat_logging_enabled`, `flood_protection_enabled`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
+  - Optional: `weather_default_location`, `youtube_api_key`, `language`, `enabled_plugins`, `disabled_plugins`, `raw_chat_logging_enabled`, `flood_protection_enabled`, `rss_announce_channel`, SASL/NickServ options, `oidentd_conf` (path to .oidentd.conf file, e.g., `~/.oidentd.conf`)
 
 Flood/spam delay behavior:
 
@@ -341,6 +342,7 @@ Notes:
 - `!lag` measures latency in nanoseconds and displays a readable millisecond value (for sub-millisecond latency as decimal, e.g. `0.123 ms`) plus raw `ns` in parentheses.
 - If `weather_default_location` is set, weather can be requested without arguments.
 - If `rss_feeds` contains aliases, `!rss` without arguments shows the available feed names.
+- If RSS announce channels are configured in the database (`rssannounce`), the RSS plugin checks configured feeds every 10 minutes and posts only new entries to all configured channels (tracked in the database).
 
 Trigger plugins:
 - `unreal`: replies with an action when a message contains `unreal`
@@ -370,6 +372,12 @@ Send these as a private message to the bot, without the normal command prefix:
 - `usermode <ident@host> <#channel> <mode>` adds a user-specific channel mode rule.
 - `usermode-del <ident@host> <#channel> <mode>` removes a user-specific rule.
 - `apply <nick> <#channel> <ident@host>` applies stored mode rules to a nick immediately.
+- `rssannounce [#channel[,#channel...]|+#channel[,#channel...]|-#channel[,#channel...]|off]` shows/sets RSS announce channels in the database for this network.
+  - `rssannounce +#chan3` adds a single channel
+  - `rssannounce -#chan2` disables a single channel from the current list
+  - after changing channels, the bot also prints the currently configured RSS feed aliases
+  - after changing channels, the bot also posts the configured RSS feed aliases directly into the target channel(s)
+  - after changing channels, the bot also posts the current/latest entry per configured RSS feed into the target channel(s)
 - `raw <IRC RAW LINE>` sends one raw IRC line directly to the server.
 
 Examples:
@@ -435,6 +443,10 @@ See `config.example.json` for all available options, including:
 - Optional RSS aliases:
   - `rss_feeds` maps alias names to RSS/Atom feed URLs
   - top-level value acts as default; each network entry can override it
+- Optional RSS auto-post default:
+  - `rss_announce_channel` is only used as initial fallback/default
+  - the active per-network value is stored in the database and managed via `rssannounce [#channel[,#channel...]|+#channel[,#channel...]|-#channel[,#channel...]|off]`
+  - if neither DB value nor fallback is set, automatic RSS posting is disabled
 
 ## License
 This project is licensed under the MIT License. See `LICENSE` for details.
