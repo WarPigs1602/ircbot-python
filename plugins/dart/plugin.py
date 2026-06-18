@@ -11,8 +11,8 @@ MESSAGES = {
         "dart_no_data": "Keine Dart-Daten vorhanden.",
         "dart_top": "Dart Top10: {items}",
         "dart_top_entry": "{index}. {nick} {points}P/{throws}W",
-        "dart_hit": "{bot} benutzt {target} als Dartpfeil und trifft {hit} ({points} Punkte) (Requested by {requested_by})",
-        "dart_destroy": "{bot} benutzt {target} als Dartpfeil und zerstoert die Dartscheibe! ({points} Punkte) ({hit}) (Requested by {requested_by})",
+        "dart_hit": "benutzt {target} als Dartpfeil und trifft {hit} ({points} Punkte) (Requested by {requested_by})",
+        "dart_destroy": "benutzt {target} als Dartpfeil und zerstoert die Dartscheibe! ({points} Punkte) ({hit}) (Requested by {requested_by})",
     },
     "en": {
         "usage_dart": "Usage: {prefix}{command} <nick>",
@@ -23,8 +23,8 @@ MESSAGES = {
         "dart_no_data": "No dart data available.",
         "dart_top": "Dart Top 10: {items}",
         "dart_top_entry": "{index}. {nick} {points}pts/{throws}th",
-        "dart_hit": "{bot} uses {target} as a dart and hits {hit} ({points} points) (Requested by {requested_by})",
-        "dart_destroy": "{bot} uses {target} as a dart and destroys the dartboard! ({points} points) ({hit}) (Requested by {requested_by})",
+        "dart_hit": "uses {target} as a dart and hits {hit} ({points} points) (Requested by {requested_by})",
+        "dart_destroy": "uses {target} as a dart and destroys the dartboard! ({points} points) ({hit}) (Requested by {requested_by})",
     },
 }
 
@@ -42,7 +42,7 @@ def handle_dart(bot, context, arg: str) -> None:
         )
         return
 
-    bot.send_privmsg(context.reply_target, bot.get_dart_stats_text(target_nick, context.source_nick))
+    bot.send_action(context.reply_target, bot.get_dart_stats_text(target_nick, context.source_nick))
 
 
 PLUGIN = PluginSpec(
