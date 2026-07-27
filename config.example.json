@@ -29,9 +29,7 @@
       "nick_protection_nick": "",
       "nick_reclaim_interval_seconds": 60,
       "nickserv_password": "",
-      "nickserv_identify_command": "PRIVMSG NickServ :IDENTIFY {password}",
-      "mondgesicht_url_enabled": false,
-      "mondgesicht_url": "https://example.invalid/mondgesicht?channel={channel_url}&lang=de&enabled=1"
+      "nickserv_identify_command": "PRIVMSG NickServ :IDENTIFY {password}"
     },
     {
       "enabled": false,
@@ -61,9 +59,7 @@
       "nick_protection_nick": "",
       "nick_reclaim_interval_seconds": 60,
       "nickserv_password": "",
-      "nickserv_identify_command": "PRIVMSG NickServ :IDENTIFY {password}",
-      "mondgesicht_url_enabled": false,
-      "mondgesicht_url": "https://example.invalid/mondgesicht?channel={channel_url}&lang=de&enabled=1"
+      "nickserv_identify_command": "PRIVMSG NickServ :IDENTIFY {password}"
     }
   ],
   "mysql_host": "127.0.0.1",

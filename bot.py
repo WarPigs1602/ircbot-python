@@ -232,8 +232,6 @@ class BotConfig:
     rss_announce_channel: str = ""
     enabled_plugins: list[str] | None = None
     disabled_plugins: list[str] | None = None
-    mondgesicht_url_enabled: bool = False
-    mondgesicht_url: str = ""
 
     @staticmethod
     def _from_raw(raw: dict[str, object]) -> "BotConfig":
@@ -319,8 +317,6 @@ class BotConfig:
             rss_announce_channel=str(raw.get("rss_announce_channel", "")).strip(),
             enabled_plugins=_parse_string_list(raw.get("enabled_plugins", [])),
             disabled_plugins=_parse_string_list(raw.get("disabled_plugins", [])),
-            mondgesicht_url_enabled=bool(raw.get("mondgesicht_url_enabled", False)),
-            mondgesicht_url=str(raw.get("mondgesicht_url", "")).strip(),
         )
 
     @staticmethod
@@ -2205,30 +2201,6 @@ class IRCBot:
                 )
                 cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_channels (
-                        network VARCHAR(255) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        created_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (network, channel)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_channel_access (
-                        network VARCHAR(255) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        access_type VARCHAR(16) NOT NULL,
-                        nick VARCHAR(64) NOT NULL,
-                        created_at VARCHAR(32) NOT NULL,
-                        created_by VARCHAR(255) NOT NULL DEFAULT '',
-                        PRIMARY KEY (network, channel, access_type, nick),
-                        KEY idx_bot_mondgesicht_channel_access_lookup (network, channel, access_type)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
                     CREATE TABLE IF NOT EXISTS bot_admin_roles (
                         network VARCHAR(255) NOT NULL,
                         role_name VARCHAR(64) NOT NULL,
@@ -2279,87 +2251,7 @@ class IRCBot:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """
                 )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_scores (
-                        network VARCHAR(255) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        nick VARCHAR(64) NOT NULL,
-                        points INT NOT NULL DEFAULT 0,
-                        updated_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (network, channel, nick),
-                        KEY idx_bot_mondgesicht_scores_rank (network, channel, points)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_jackpot (
-                        network VARCHAR(255) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        jackpot_points INT NOT NULL DEFAULT 0,
-                        last_awarded_points INT NOT NULL DEFAULT 0,
-                        last_awarded_to VARCHAR(255) NOT NULL DEFAULT '',
-                        updated_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (network, channel)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_round_awards (
-                        id BIGINT NOT NULL AUTO_INCREMENT,
-                        network VARCHAR(255) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        nick VARCHAR(64) NOT NULL,
-                        round_token VARCHAR(64) NOT NULL DEFAULT '',
-                        points_awarded INT NOT NULL,
-                        created_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (id),
-                        KEY idx_bot_mondgesicht_round_awards_lookup (network, channel, nick, created_at),
-                        KEY idx_bot_mondgesicht_round_awards_token (network, channel, round_token)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                self.ensure_mondgesicht_round_awards_schema(cur)
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_adds (
-                        id BIGINT NOT NULL AUTO_INCREMENT,
-                        network VARCHAR(255) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        nick VARCHAR(64) NOT NULL,
-                        category VARCHAR(32) NOT NULL,
-                        entry_text TEXT NOT NULL,
-                        created_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (id),
-                        KEY idx_bot_mondgesicht_adds_lookup (network, channel, category, created_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_mondgesicht_texts (
-                        id BIGINT NOT NULL AUTO_INCREMENT,
-                        network VARCHAR(255) NOT NULL,
-                        language VARCHAR(8) NOT NULL,
-                        category VARCHAR(32) NOT NULL,
-                        entry_text TEXT NOT NULL,
-                        created_at VARCHAR(32) NOT NULL,
-                        created_by VARCHAR(255) NOT NULL DEFAULT '',
-                        PRIMARY KEY (id),
-                        KEY idx_bot_mondgesicht_texts_lookup (network, language, category, id)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                self.ensure_mondgesicht_text_storage_utf8mb4(cur)
-                seeded, seeded_count = self.seed_default_mondgesicht_texts("system", replace_existing=False)
-                if not seeded:
-                    print(f"Mondgesicht seed skipped for {self.config.network_key}.")
-                elif seeded_count > 0:
-                    print(f"Seeded {seeded_count} Mondgesicht texts for {self.config.network_key}.")
-                self.reset_mondgesicht_excluded_nick_points()
-            self.db_initialized = True
+                self.db_initialized = True
         except Exception as exc:
             print(self.tr("db_table_setup_failed", error=exc))
         finally:
@@ -2531,32 +2423,6 @@ class IRCBot:
         if not normalized_channel.startswith("#"):
             return False, INVALID_CHANNEL_MESSAGE
         return self.set_rss_announce_channels([normalized_channel])
-
-    def ensure_mondgesicht_text_storage_utf8mb4(self, cur) -> None:
-        db_name = self.config.mysql_database.replace("`", "``")
-        cur.execute(f"ALTER DATABASE `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-        cur.execute("ALTER TABLE bot_mondgesicht_jackpot CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-        cur.execute("ALTER TABLE bot_mondgesicht_round_awards CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-        cur.execute("ALTER TABLE bot_mondgesicht_adds CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-        cur.execute("ALTER TABLE bot_mondgesicht_texts CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-
-    def ensure_mondgesicht_round_awards_schema(self, cur) -> None:
-        try:
-            cur.execute("ALTER TABLE bot_mondgesicht_round_awards ADD COLUMN round_token VARCHAR(64) NOT NULL DEFAULT '' AFTER nick")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE bot_mondgesicht_round_awards ADD KEY idx_bot_mondgesicht_round_awards_token (network, channel, round_token)")
-        except Exception:
-            pass
-
-    def seed_default_mondgesicht_texts(self, created_by: str, *, replace_existing: bool = False) -> tuple[bool, int]:
-        from plugins.moonface.plugin import seed_default_mondgesicht_texts as _fn
-        return _fn(self, created_by, replace_existing=replace_existing)
-
-    def reset_mondgesicht_excluded_nick_points(self) -> None:
-        from plugins.moonface.plugin import reset_mondgesicht_excluded_nick_points as _fn
-        _fn(self)
 
     @staticmethod
     def hash_admin_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:

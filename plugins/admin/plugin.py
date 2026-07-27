@@ -26,17 +26,6 @@ MESSAGES = {
         "admin_help_rss_3": "rssannounce +<#channel[,#channel...]> fuegt Channels zur bestehenden Liste hinzu.",
         "admin_help_rss_4": "rssannounce -<#channel[,#channel...]> entfernt Channels einzeln aus der bestehenden Liste.",
         "admin_help_rss_5": "rssannounce off deaktiviert automatische RSS-Ankuendigungen.",
-        "admin_help_mg_1": "mgadd [de|en] <punkt|komma|strich> speichert einen neuen Mondgesicht-Text.",
-        "admin_help_mg_2": "mglist [de|en] [punkt|komma|strich] listet gespeicherte Mondgesicht-Texte auf.",
-        "admin_help_mg_3": "mgdel <id> löscht einen Mondgesicht-Text per ID.",
-        "admin_help_mg_4": "mgseed spielt die Standard-Mondgesicht-Texte erneut ein.",
-        "admin_help_mg_5": "mgchannels zeigt alle aktiven Mondgesicht-Channels.",
-        "admin_help_mg_6": "mgchannel-add <#channel> aktiviert Mondgesicht für einen Channel.",
-        "admin_help_mg_7": "mgchannel-del <#channel> deaktiviert Mondgesicht für einen Channel.",
-        "admin_help_mg_8": "mggott-add <#channel> <nick> trägt einen Mondgesicht-Gott channelspezifisch ein.",
-        "admin_help_mg_9": "mggott-del <#channel> <nick> entfernt einen Mondgesicht-Gott channelspezifisch.",
-        "admin_help_mg_10": "mgignore-add <#channel> <nick> trägt einen Mondgesicht-Ignore-Nick channelspezifisch ein.",
-        "admin_help_mg_11": "mgignore-del <#channel> <nick> entfernt einen Mondgesicht-Ignore-Nick channelspezifisch.",
         "admin_help_raw_1": "raw <IRC-RAW-Zeile> sendet eine IRC-Zeile direkt an den Server.",
         "admin_help_raw_2": "Beispiel: raw MODE #chan +o Nick",
         "admin_help_caps": "caps zeigt die aktuell aktivierten IRC-Capabilities.",
@@ -101,17 +90,6 @@ MESSAGES = {
         "admin_help_rss_3": "rssannounce +<#channel[,#channel...]> adds channels to the current list.",
         "admin_help_rss_4": "rssannounce -<#channel[,#channel...]> removes channels individually from the current list.",
         "admin_help_rss_5": "rssannounce off disables automatic RSS announcements.",
-        "admin_help_mg_1": "mgadd [de|en] <point|comma|stroke> stores a new Moonface text.",
-        "admin_help_mg_2": "mglist [de|en] [point|comma|stroke] lists stored Moonface texts.",
-        "admin_help_mg_3": "mgdel <id> deletes a Moonface text by ID.",
-        "admin_help_mg_4": "mgseed restores the built-in Moonface texts.",
-        "admin_help_mg_5": "mgchannels shows all active Moonface channels.",
-        "admin_help_mg_6": "mgchannel-add <#channel> enables Moonface for one channel.",
-        "admin_help_mg_7": "mgchannel-del <#channel> disables Moonface for one channel.",
-        "admin_help_mg_8": "mggod-add <#channel> <nick> stores one channel-specific Moonface god.",
-        "admin_help_mg_9": "mggod-del <#channel> <nick> removes one channel-specific Moonface god.",
-        "admin_help_mg_10": "mgignore-add <#channel> <nick> stores one channel-specific Moonface ignore nick.",
-        "admin_help_mg_11": "mgignore-del <#channel> <nick> removes one channel-specific Moonface ignore nick.",
         "admin_help_raw_1": "raw <IRC raw line> sends one IRC line directly to the server.",
         "admin_help_raw_2": "Example: raw MODE #chan +o Nick",
         "admin_help_caps": "caps shows the currently active IRC capabilities.",
@@ -157,14 +135,8 @@ MESSAGES = {
 }
 
 
-def has_mg_admin_help(bot) -> bool:
-    return "moonface" in bot.plugin_manager.loaded_plugins
-
-
 def admin_help_topics(bot) -> str:
     topics = ["auth", "users", "roles", "modes", "rss"]
-    if has_mg_admin_help(bot):
-        topics.append("mg")
     topics.append("raw")
     topics.append("cap")
     topics.append("reload")
@@ -241,37 +213,6 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
         "cap": ("admin_help_caps",),
         "reload": ("admin_help_reload",),
     }
-    if has_mg_admin_help(bot):
-        help_sections[""] = (
-            help_sections[""][:-3]
-            + (
-                "admin_help_mg_1",
-                "admin_help_mg_2",
-                "admin_help_mg_3",
-                "admin_help_mg_4",
-                "admin_help_mg_5",
-                "admin_help_mg_6",
-                "admin_help_mg_7",
-                "admin_help_mg_8",
-                "admin_help_mg_9",
-                "admin_help_mg_10",
-                "admin_help_mg_11",
-            )
-            + help_sections[""][-3:]
-        )
-        help_sections["mg"] = (
-            "admin_help_mg_1",
-            "admin_help_mg_2",
-            "admin_help_mg_3",
-            "admin_help_mg_4",
-            "admin_help_mg_5",
-            "admin_help_mg_6",
-            "admin_help_mg_7",
-            "admin_help_mg_8",
-            "admin_help_mg_9",
-            "admin_help_mg_10",
-            "admin_help_mg_11",
-        )
 
     help_topics = admin_help_topics(bot)
 
@@ -281,8 +222,6 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
             reply(bot, context, bot.tr(key))
         return
 
-    if normalized_topic in {"mondgesicht", "moonface"}:
-        normalized_topic = "mg"
     if normalized_topic in {"cap", "caps", "capability", "capabilities"}:
         normalized_topic = "cap"
     if normalized_topic in {"reload", "reloadplugins"}:
