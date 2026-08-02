@@ -8,6 +8,92 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
+class URLRepository:
+    def __init__(self, db_conn, network_key):
+        self.db_conn = db_conn
+        self.network_key = network_key
+
+    def fetch_by_id(self, url_id):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE id = %s LIMIT 1",
+                    (url_id,),
+                )
+                return cur.fetchone()
+        except Exception:
+            return None
+
+    def fetch_random(self):
+        try:
+            with self.db_conn.cursor() as cur:
+                for _ in range(10):
+                    cur.execute(
+                        "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE is_blocked = 0 AND is_deadlink = 0 ORDER BY RAND() LIMIT 1"
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        return row
+                return None
+        except Exception:
+            return None
+
+    def fetch_by_value(self, url):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE url = %s ORDER BY id ASC LIMIT 1",
+                    (url,),
+                )
+                return cur.fetchone()
+        except Exception:
+            return None
+
+    def store_if_missing(self, url, posted_by, current_time, topic=None, title_missing=False):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("SELECT id FROM bot_url WHERE url = %s ORDER BY id ASC LIMIT 1", (url,))
+                existing = cur.fetchone()
+                if existing:
+                    if topic:
+                        cur.execute(
+                            "UPDATE bot_url SET topic = %s, title_missing = %s WHERE url = %s",
+                            (topic[:180], 1 if title_missing else 0, url),
+                        )
+                    return int(existing.get("id"))
+
+                cur.execute("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM bot_url")
+                next_row = cur.fetchone() or {}
+                next_id = int(next_row.get("next_id", 1))
+
+                cur.execute(
+                    "INSERT INTO bot_url (id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing) VALUES (%s, %s, %s, %s, 0, 0, %s, %s)",
+                    (next_id, url, posted_by, current_time, (topic[:180] if topic else None), 1 if title_missing else 0),
+                )
+                return next_id
+        except Exception:
+            return None
+
+    def get_max_id(self):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("SELECT MAX(id) AS max_id FROM bot_url")
+                row = cur.fetchone() or {}
+                return int(row.get("max_id") or 0) or None
+        except Exception:
+            return None
+
+    def update_flag(self, url, flag_name):
+        allowed = {"is_blocked", "is_deadlink"}
+        if flag_name not in allowed:
+            return
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(f"UPDATE bot_url SET {flag_name} = 1 WHERE url = %s", (url,))
+        except Exception:
+            pass
+
+
 URL_PATTERN = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
 USER_AGENT = "Mozilla/5.0 IRCBot"
 
@@ -55,7 +141,16 @@ class _TopicParser(HTMLParser):
 
 
 class URLService:
+    def __init__(self) -> None:
+        self._last_sniff_time: dict[str, float] = {}
+
     def sniff_urls_in_message(self, bot, message: str, channel: str, source_nick: str) -> None:
+        now = time.time()
+        last_time = self._last_sniff_time.get(channel, 0.0)
+        if now - last_time < 10.0:
+            return
+        self._last_sniff_time[channel] = now
+
         seen_in_message: set[str] = set()
         for raw_url in URL_PATTERN.findall(message):
             normalized_url = self.normalize_url(raw_url)
@@ -236,12 +331,7 @@ class URLService:
             return {"status": "error", "message": "Database unavailable." if bot.config.language == "en" else "Datenbank nicht erreichbar."}
 
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE id = %s LIMIT 1",
-                    (url_id,),
-                )
-                row = cur.fetchone()
+            row = URLRepository(conn, bot.config.network_key).fetch_by_id(url_id)
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
         finally:
@@ -291,40 +381,35 @@ class URLService:
             return {"status": "error", "message": "Database unavailable." if bot.config.language == "en" else "Datenbank nicht erreichbar."}
 
         try:
-            with conn.cursor() as cur:
-                for _ in range(10):
-                    cur.execute(
-                        "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE is_blocked = 0 AND is_deadlink = 0 ORDER BY RAND() LIMIT 1"
-                    )
-                    row = cur.fetchone()
-                    if not row:
-                        return None
-
-                    cached_result = self.build_cached_url_result(bot, row)
-                    if cached_result:
-                        cached_result["max_id"] = self.get_max_url_id(bot)
-                        return cached_result
-
-                    topic_result = self.describe_url(bot, str(row.get("url", "")))
-                    if topic_result.get("status") == "ok":
-                        topic_result["id"] = int(row.get("id", 0))
-                        topic_result["posted_by"] = str(row.get("posted_by", "")).strip()
-                        topic_result["max_id"] = self.get_max_url_id(bot)
-                        self.store_url_if_missing(
-                            bot,
-                            str(row.get("url", "")),
-                            str(row.get("posted_by", "")),
-                            topic=str(topic_result.get("topic", "")) or None,
-                            title_missing=bool(topic_result.get("title_missing", False)),
-                        )
-                        return topic_result
-                    if topic_result.get("status") == "error":
-                        return topic_result
+            row = URLRepository(conn, bot.config.network_key).fetch_random()
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
         finally:
             conn.close()
 
+        if not row:
+            return None
+
+        cached_result = self.build_cached_url_result(bot, row)
+        if cached_result:
+            cached_result["max_id"] = self.get_max_url_id(bot)
+            return cached_result
+
+        topic_result = self.describe_url(bot, str(row.get("url", "")))
+        if topic_result.get("status") == "ok":
+            topic_result["id"] = int(row.get("id", 0))
+            topic_result["posted_by"] = str(row.get("posted_by", "")).strip()
+            topic_result["max_id"] = self.get_max_url_id(bot)
+            self.store_url_if_missing(
+                bot,
+                str(row.get("url", "")),
+                str(row.get("posted_by", "")),
+                topic=str(topic_result.get("topic", "")) or None,
+                title_missing=bool(topic_result.get("title_missing", False)),
+            )
+            return topic_result
+        if topic_result.get("status") == "error":
+            return topic_result
         return None
 
     def fetch_url_by_value(self, bot, url: str) -> dict[str, str | int | bool | None] | None:
@@ -333,12 +418,7 @@ class URLService:
             return None
 
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing FROM bot_url WHERE url = %s ORDER BY id ASC LIMIT 1",
-                    (url,),
-                )
-                row = cur.fetchone()
+            row = URLRepository(conn, bot.config.network_key).fetch_by_value(url)
         except Exception:
             return None
         finally:
@@ -445,32 +525,11 @@ class URLService:
             return None
 
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM bot_url WHERE url = %s ORDER BY id ASC LIMIT 1", (url,))
-                existing_row = cur.fetchone()
-                if existing_row:
-                    if topic:
-                        cur.execute(
-                            "UPDATE bot_url SET topic = %s, title_missing = %s WHERE url = %s",
-                            (topic[:180], 1 if title_missing else 0, url),
-                        )
-                    return bot.safe_int(existing_row.get("id"))
-
-                cur.execute("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM bot_url")
-                next_row = cur.fetchone() or {}
-                next_id = int(next_row.get("next_id", 1))
-
-                cur.execute(
-                    "INSERT INTO bot_url (id, url, posted_by, time, is_blocked, is_deadlink, topic, title_missing) VALUES (%s, %s, %s, %s, 0, 0, %s, %s)",
-                    (next_id, url, posted_by, bot.current_time_string(), (topic[:180] if topic else None), 1 if title_missing else 0),
-                )
-                return next_id
-        except Exception:
-            return None
+            return URLRepository(conn, bot.config.network_key).store_if_missing(
+                url, posted_by, bot.current_time_string(), topic, title_missing
+            )
         finally:
             conn.close()
-
-        return None
 
     def get_max_url_id(self, bot) -> int | None:
         conn = bot.open_db_connection()
@@ -478,12 +537,7 @@ class URLService:
             return None
 
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT MAX(id) AS max_id FROM bot_url")
-                row = cur.fetchone() or {}
-                return bot.safe_int(row.get("max_id"))
-        except Exception:
-            return None
+            return URLRepository(conn, bot.config.network_key).get_max_id()
         finally:
             conn.close()
 
@@ -582,12 +636,13 @@ class URLService:
         if not video_id:
             return {"status": "error", "message": bot.tr("yt_invalid_id")}
 
-        if not bot.config.youtube_api_key:
+        api_key = getattr(bot, "_url_youtube_api_key", "") or ""
+        if not api_key:
             return {"status": "error", "message": bot.tr("yt_missing_key")}
 
         api_url = (
             "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id="
-            f"{quote(video_id)}&key={quote(bot.config.youtube_api_key)}"
+            f"{quote(video_id)}&key={quote(api_key)}"
         )
         data = self.fetch_json_with_timeout(api_url, bot.config.url_timeout_seconds)
         if not data:
@@ -698,3 +753,132 @@ class URLService:
             posted_by=normalized_posted_by,
             requested_by=normalized_requested_by,
         )
+
+
+def ensure_bot_url_schema(cur, database):
+    cur.execute(
+        """
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'bot_url'
+        """,
+        (database,),
+    )
+    existing_columns = {str(row.get("COLUMN_NAME", "")) for row in (cur.fetchall() or [])}
+
+    if "topic" not in existing_columns:
+        cur.execute("ALTER TABLE bot_url ADD COLUMN topic VARCHAR(180) NULL")
+    if "title_missing" not in existing_columns:
+        cur.execute("ALTER TABLE bot_url ADD COLUMN title_missing TINYINT(1) NOT NULL DEFAULT 0")
+
+
+def ensure_url_tables(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_url (
+                id INT NOT NULL,
+                url VARCHAR(2048) NOT NULL,
+                posted_by VARCHAR(64) NOT NULL DEFAULT '',
+                time VARCHAR(32) NOT NULL DEFAULT '',
+                is_blocked TINYINT(1) NOT NULL DEFAULT 0,
+                is_deadlink TINYINT(1) NOT NULL DEFAULT 0,
+                topic VARCHAR(180) NULL,
+                title_missing TINYINT(1) NOT NULL DEFAULT 0,
+                PRIMARY KEY (id),
+                KEY idx_bot_url_flags (is_blocked, is_deadlink)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+
+from plugin_system import PluginSpec
+
+
+def on_config_loaded(bot, raw_config: dict[str, object]) -> None:
+    bot._url_youtube_api_key = str(raw_config.get("youtube_api_key", "") or "").strip()
+    bot.spam_words = (
+        "casino",
+        "viagra",
+        "porn",
+        "xxx",
+        "sex",
+        "adult",
+        "pharmacy",
+        "loan",
+        "crypto",
+        "bitcoin",
+        "bet",
+        "bonus",
+        "click",
+        "free money",
+        "win money",
+    )
+    bot.spam_hosts = (
+        "bit.ly",
+        "tinyurl.com",
+        "t.co",
+        "goo.gl",
+        "is.gd",
+        "cutt.ly",
+        "rebrand.ly",
+    )
+    bot.dangerous_content_types = frozenset({
+        "application/octet-stream",
+        "application/x-msdownload",
+        "application/x-ms-dos-executable",
+        "application/vnd.microsoft.portable-executable",
+        "application/x-executable",
+        "application/x-msi",
+        "application/x-msdos-program",
+        "application/x-sh",
+        "application/x-csh",
+        "application/x-bash",
+        "application/x-perl",
+        "application/x-python-code",
+        "text/x-sh",
+        "text/x-bash",
+        "text/x-perl",
+        "text/x-python",
+        "text/x-ruby",
+        "application/x-ruby",
+        "application/x-bat",
+        "application/x-powershell",
+        "text/x-powershell",
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/x-rar-compressed",
+        "application/vnd.rar",
+        "application/x-7z-compressed",
+        "application/x-tar",
+        "application/x-gzip",
+        "application/x-bzip2",
+        "application/x-xz",
+        "application/zstd",
+        "application/x-lzma",
+        "application/java-archive",
+        "application/x-java-archive",
+        "application/vnd.android.package-archive",
+        "application/x-apple-diskimage",
+        "application/x-macos-pkg",
+        "application/x-deb",
+        "application/x-rpm",
+        "application/vnd.ms-excel.sheet.macroEnabled.12",
+        "application/vnd.ms-word.document.macroEnabled.12",
+        "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+        "application/vnd.ms-office",
+        "application/x-shockwave-flash",
+        "application/x-ms-application",
+        "application/x-ms-xbap",
+        "application/vnd.ms-htmlhelp",
+    })
+
+
+PLUGIN = PluginSpec(
+    name="url_service",
+    hooks={
+        "ensure_tables": ensure_url_tables,
+        "ensure_schema": ensure_bot_url_schema,
+    },
+    on_config_loaded=on_config_loaded,
+)

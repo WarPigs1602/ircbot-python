@@ -1,6 +1,337 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
+import re
+import time
+
 from plugin_system import CommandSpec, MessageHandlerSpec, PluginSpec
+
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
+
+
+class AdminRepository:
+    def __init__(self, db_conn, network_key):
+        self.db_conn = db_conn
+        self.network_key = network_key
+
+    def has_users(self):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_users WHERE network = %s LIMIT 1",
+                    (self.network_key,),
+                )
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+
+    def ensure_default_role(self, current_time):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1",
+                    (self.network_key, "admin"),
+                )
+                if cur.fetchone() is not None:
+                    cur.execute(
+                        "UPDATE bot_admin_roles SET is_admin = 1, can_raw = 1 WHERE network = %s AND role_name = %s",
+                        (self.network_key, "admin"),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
+                        VALUES (%s, %s, 1, 1, %s)
+                        """,
+                        (self.network_key, "admin", current_time),
+                    )
+
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1",
+                    (self.network_key, "user"),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        """
+                        INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
+                        VALUES (%s, %s, 0, 0, %s)
+                        """,
+                        (self.network_key, "user", current_time),
+                    )
+        except Exception:
+            pass
+
+    def load_user(self, user_mask):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT u.user_mask, u.display_name, u.password_salt, u.password_hash, u.role_name,
+                           COALESCE(r.is_admin, 0) AS is_admin,
+                           COALESCE(r.can_raw, 0) AS can_raw
+                    FROM bot_admin_users u
+                    LEFT JOIN bot_admin_roles r
+                      ON r.network = u.network AND r.role_name = u.role_name
+                    WHERE u.network = %s AND u.user_mask = %s
+                    LIMIT 1
+                    """,
+                    (self.network_key, user_mask),
+                )
+                return cur.fetchone()
+        except Exception:
+            return None
+
+    def create_role(self, role_name, is_admin=False, can_raw=False, current_time=""):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1",
+                    (self.network_key, role_name),
+                )
+                if cur.fetchone() is not None:
+                    return False
+                cur.execute(
+                    """
+                    INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (self.network_key, role_name, 1 if is_admin else 0, 1 if can_raw else 0, current_time),
+                )
+            return True
+        except Exception:
+            return False
+
+    def set_role_flag(self, role_name, flag_name, enabled):
+        allowed_columns = {"admin": "is_admin", "raw": "can_raw"}
+        column = allowed_columns.get(flag_name)
+        if not column:
+            return False
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE bot_admin_roles SET {column} = %s WHERE network = %s AND role_name = %s",
+                    (1 if enabled else 0, self.network_key, role_name),
+                )
+                return cur.rowcount > 0
+        except Exception:
+            return False
+
+    def list_roles(self):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role_name, is_admin, can_raw
+                    FROM bot_admin_roles
+                    WHERE network = %s
+                    ORDER BY role_name ASC
+                    """,
+                    (self.network_key,),
+                )
+                return list(cur.fetchall() or [])
+        except Exception:
+            return []
+
+    def create_user(self, display_name, user_mask, password_salt, password_hash, role_name, current_time, created_by):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1",
+                    (self.network_key, role_name),
+                )
+                if cur.fetchone() is None:
+                    return False, "role_missing"
+
+                cur.execute(
+                    "SELECT 1 FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
+                    (self.network_key, user_mask),
+                )
+                if cur.fetchone() is not None:
+                    return False, "user_exists"
+
+                cur.execute(
+                    """
+                    INSERT INTO bot_admin_users
+                        (network, user_mask, display_name, password_salt, password_hash, role_name, created_at, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        self.network_key,
+                        user_mask,
+                        display_name[:64],
+                        password_salt,
+                        password_hash,
+                        role_name,
+                        current_time,
+                        created_by[:64],
+                    ),
+                )
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    def delete_user(self, user_mask):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s",
+                    (self.network_key, user_mask),
+                )
+                cur.execute(
+                    "DELETE FROM bot_admin_users WHERE network = %s AND user_mask = %s",
+                    (self.network_key, user_mask),
+                )
+                return cur.rowcount > 0
+        except Exception:
+            return False
+
+    def set_user_role(self, user_mask, role_name):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE bot_admin_users SET role_name = %s WHERE network = %s AND user_mask = %s",
+                    (role_name, self.network_key, user_mask),
+                )
+                return cur.rowcount > 0
+        except Exception:
+            return False
+
+    def list_users(self):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_mask, display_name, role_name
+                    FROM bot_admin_users
+                    WHERE network = %s
+                    ORDER BY user_mask ASC
+                    """,
+                    (self.network_key,),
+                )
+                return list(cur.fetchall() or [])
+        except Exception:
+            return []
+
+    def set_role_channel_mode(self, role_name, channel, mode, current_time, enabled):
+        try:
+            with self.db_conn.cursor() as cur:
+                if enabled:
+                    cur.execute(
+                        """
+                        INSERT IGNORE INTO bot_admin_role_modes (network, role_name, channel, mode, created_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (self.network_key, role_name, channel, mode, current_time),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM bot_admin_role_modes WHERE network = %s AND role_name = %s AND channel = %s AND mode = %s",
+                        (self.network_key, role_name, channel, mode),
+                    )
+            return True
+        except Exception:
+            return False
+
+    def set_user_channel_mode(self, user_mask, channel, mode, current_time, enabled):
+        try:
+            with self.db_conn.cursor() as cur:
+                if enabled:
+                    cur.execute(
+                        """
+                        INSERT IGNORE INTO bot_admin_user_modes (network, user_mask, channel, mode, created_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (self.network_key, user_mask, channel, mode, current_time),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s AND channel = %s AND mode = %s",
+                        (self.network_key, user_mask, channel, mode),
+                    )
+            return True
+        except Exception:
+            return False
+
+    def get_configured_user_channel_modes(self, user_mask, channel):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT role_name FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
+                    (self.network_key, user_mask),
+                )
+                row = cur.fetchone() or {}
+                role_name = str(row.get("role_name", "")).strip()
+
+                modes = set()
+                if role_name:
+                    cur.execute(
+                        "SELECT mode FROM bot_admin_role_modes WHERE network = %s AND role_name = %s AND channel = %s",
+                        (self.network_key, role_name, channel),
+                    )
+                    modes.update(
+                        mode
+                        for mode in (
+                            str(entry.get("mode", "")).strip()
+                            for entry in (cur.fetchall() or [])
+                        )
+                        if mode
+                    )
+
+                cur.execute(
+                    "SELECT mode FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s AND channel = %s",
+                    (self.network_key, user_mask, channel),
+                )
+                modes.update(
+                    mode
+                    for mode in (
+                        str(entry.get("mode", "")).strip()
+                        for entry in (cur.fetchall() or [])
+                    )
+                    if mode
+                )
+            return modes
+        except Exception:
+            return set()
+
+    def get_user_assigned_channels(self, user_mask):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT role_name FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
+                    (self.network_key, user_mask),
+                )
+                row = cur.fetchone() or {}
+                role_name = str(row.get("role_name", "")).strip()
+
+                channels = set()
+                if role_name:
+                    cur.execute(
+                        "SELECT channel FROM bot_admin_role_modes WHERE network = %s AND role_name = %s",
+                        (self.network_key, role_name),
+                    )
+                    channels.update(
+                        str(entry.get("channel", "")).strip()
+                        for entry in (cur.fetchall() or [])
+                        if str(entry.get("channel", "")).strip()
+                    )
+
+                cur.execute(
+                    "SELECT channel FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s",
+                    (self.network_key, user_mask),
+                )
+                channels.update(
+                    str(entry.get("channel", "")).strip()
+                    for entry in (cur.fetchall() or [])
+                    if str(entry.get("channel", "")).strip()
+                )
+            return channels
+        except Exception:
+            return set()
 
 
 MESSAGES = {
@@ -26,6 +357,17 @@ MESSAGES = {
         "admin_help_rss_3": "rssannounce +<#channel[,#channel...]> fuegt Channels zur bestehenden Liste hinzu.",
         "admin_help_rss_4": "rssannounce -<#channel[,#channel...]> entfernt Channels einzeln aus der bestehenden Liste.",
         "admin_help_rss_5": "rssannounce off deaktiviert automatische RSS-Ankuendigungen.",
+        "admin_help_mg_1": "mgadd [de|en] <punkt|komma|strich> speichert einen neuen Mondgesicht-Text.",
+        "admin_help_mg_2": "mglist [de|en] [punkt|komma|strich] listet gespeicherte Mondgesicht-Texte auf.",
+        "admin_help_mg_3": "mgdel <id> löscht einen Mondgesicht-Text per ID.",
+        "admin_help_mg_4": "mgseed spielt die Standard-Mondgesicht-Texte erneut ein.",
+        "admin_help_mg_5": "mgchannels zeigt alle aktiven Mondgesicht-Channels.",
+        "admin_help_mg_6": "mgchannel-add <#channel> aktiviert Mondgesicht für einen Channel.",
+        "admin_help_mg_7": "mgchannel-del <#channel> deaktiviert Mondgesicht für einen Channel.",
+        "admin_help_mg_8": "mggott-add <#channel> <nick> trägt einen Mondgesicht-Gott channelspezifisch ein.",
+        "admin_help_mg_9": "mggott-del <#channel> <nick> entfernt einen Mondgesicht-Gott channelspezifisch.",
+        "admin_help_mg_10": "mgignore-add <#channel> <nick> trägt einen Mondgesicht-Ignore-Nick channelspezifisch ein.",
+        "admin_help_mg_11": "mgignore-del <#channel> <nick> entfernt einen Mondgesicht-Ignore-Nick channelspezifisch.",
         "admin_help_raw_1": "raw <IRC-RAW-Zeile> sendet eine IRC-Zeile direkt an den Server.",
         "admin_help_raw_2": "Beispiel: raw MODE #chan +o Nick",
         "admin_help_caps": "caps zeigt die aktuell aktivierten IRC-Capabilities.",
@@ -90,6 +432,17 @@ MESSAGES = {
         "admin_help_rss_3": "rssannounce +<#channel[,#channel...]> adds channels to the current list.",
         "admin_help_rss_4": "rssannounce -<#channel[,#channel...]> removes channels individually from the current list.",
         "admin_help_rss_5": "rssannounce off disables automatic RSS announcements.",
+        "admin_help_mg_1": "mgadd [de|en] <point|comma|stroke> stores a new Moonface text.",
+        "admin_help_mg_2": "mglist [de|en] [point|comma|stroke] lists stored Moonface texts.",
+        "admin_help_mg_3": "mgdel <id> deletes a Moonface text by ID.",
+        "admin_help_mg_4": "mgseed restores the built-in Moonface texts.",
+        "admin_help_mg_5": "mgchannels shows all active Moonface channels.",
+        "admin_help_mg_6": "mgchannel-add <#channel> enables Moonface for one channel.",
+        "admin_help_mg_7": "mgchannel-del <#channel> disables Moonface for one channel.",
+        "admin_help_mg_8": "mggod-add <#channel> <nick> stores one channel-specific Moonface god.",
+        "admin_help_mg_9": "mggod-del <#channel> <nick> removes one channel-specific Moonface god.",
+        "admin_help_mg_10": "mgignore-add <#channel> <nick> stores one channel-specific Moonface ignore nick.",
+        "admin_help_mg_11": "mgignore-del <#channel> <nick> removes one channel-specific Moonface ignore nick.",
         "admin_help_raw_1": "raw <IRC raw line> sends one IRC line directly to the server.",
         "admin_help_raw_2": "Example: raw MODE #chan +o Nick",
         "admin_help_caps": "caps shows the currently active IRC capabilities.",
@@ -135,12 +488,94 @@ MESSAGES = {
 }
 
 
+ADMIN_COMMANDS = frozenset({
+    "admin",
+    "help",
+    "login",
+    "logout",
+    "whoami",
+    "listroles",
+    "listusers",
+    "roleadd",
+    "roleflag",
+    "adduser",
+    "deluser",
+    "setrole",
+    "rolemode",
+    "rolemode-del",
+    "usermode",
+    "usermode-del",
+    "apply",
+    "rssannounce",
+    "rsschannel",
+    "raw",
+    "caps",
+    "reloadplugins",
+})
+
+
+ADMIN_HELP_ENTRIES = {
+    "de": (
+        "logout - beendet deine aktuelle Admin-Session.",
+        "whoami - zeigt deine aktuelle Rolle und gesetzte Rechte.",
+        "listusers - listet alle gespeicherten Admin-Benutzer auf.",
+        "adduser <name> <ident@host> <passwort> [rolle] - legt einen Benutzer an.",
+        "deluser <ident@host> - entfernt einen Benutzer vollständig.",
+        "setrole <ident@host> <rolle> - weist einem Benutzer eine andere Rolle zu.",
+        "listroles - zeigt alle Rollen mit Admin- und RAW-Rechten.",
+        "roleadd <rolle> [admin=on] [raw=on] - legt eine neue Rolle an.",
+        "roleflag <rolle> <admin|raw> <on|off> - schaltet ein Rollen-Flag um.",
+        "rolemode <rolle> <#channel> <modus> - erlaubt einen Channel-Modus für eine Rolle.",
+        "rolemode-del <rolle> <#channel> <modus> - entfernt diesen Rollen-Modus wieder.",
+        "usermode <ident@host> <#channel> <modus> - setzt eine benutzerspezifische Ausnahme.",
+        "usermode-del <ident@host> <#channel> <modus> - entfernt diese Benutzer-Ausnahme.",
+        "apply <nick> <#channel> <ident@host> - wendet die gespeicherten Modi sofort an.",
+        "raw <IRC-RAW-Zeile> - sendet eine IRC-Zeile direkt an den Server.",
+    ),
+    "en": (
+        "logout - ends your current admin session.",
+        "whoami - shows your current role and granted rights.",
+        "listusers - shows all stored admin users.",
+        "adduser <name> <ident@host> <password> [role] - creates a user.",
+        "deluser <ident@host> - removes a user completely.",
+        "setrole <ident@host> <role> - assigns a different role to a user.",
+        "listroles - shows all roles with admin and RAW rights.",
+        "roleadd <role> [admin=on] [raw=on] - creates a new role.",
+        "roleflag <role> <admin|raw> <on|off> - toggles one role flag.",
+        "rolemode <role> <#channel> <mode> - allows one channel mode for a role.",
+        "rolemode-del <role> <#channel> <mode> - removes that role mode again.",
+        "usermode <ident@host> <#channel> <mode> - creates a user-specific override.",
+        "usermode-del <ident@host> <#channel> <mode> - removes that user override.",
+        "apply <nick> <#channel> <ident@host> - applies the stored modes immediately.",
+        "raw <IRC raw line> - sends one IRC line directly to the server.",
+    ),
+}
+
+
+def has_mg_admin_help(bot) -> bool:
+    return "moonface" in bot.plugin_manager.loaded_plugins
+
+
 def admin_help_topics(bot) -> str:
     topics = ["auth", "users", "roles", "modes", "rss"]
+    if has_mg_admin_help(bot):
+        topics.append("mg")
     topics.append("raw")
     topics.append("cap")
     topics.append("reload")
     return "|".join(topics)
+
+
+def get_admin_help_entries(bot, context) -> tuple[str, ...]:
+    if not context.is_private_message or "admin" not in bot.plugin_manager.loaded_plugins:
+        return ()
+
+    admin_row = bot.get_authenticated_admin(context.source_mask, require_admin=True)
+    if admin_row is None or not bool(int(admin_row.get("is_admin", 0))):
+        return ()
+
+    language = bot.config.language if bot.config.language in {"de", "en"} else "de"
+    return ADMIN_HELP_ENTRIES.get(language, ADMIN_HELP_ENTRIES["de"])
 
 
 def parse_switch(value: str) -> bool | None:
@@ -213,6 +648,37 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
         "cap": ("admin_help_caps",),
         "reload": ("admin_help_reload",),
     }
+    if has_mg_admin_help(bot):
+        help_sections[""] = (
+            help_sections[""][:-3]
+            + (
+                "admin_help_mg_1",
+                "admin_help_mg_2",
+                "admin_help_mg_3",
+                "admin_help_mg_4",
+                "admin_help_mg_5",
+                "admin_help_mg_6",
+                "admin_help_mg_7",
+                "admin_help_mg_8",
+                "admin_help_mg_9",
+                "admin_help_mg_10",
+                "admin_help_mg_11",
+            )
+            + help_sections[""][-3:]
+        )
+        help_sections["mg"] = (
+            "admin_help_mg_1",
+            "admin_help_mg_2",
+            "admin_help_mg_3",
+            "admin_help_mg_4",
+            "admin_help_mg_5",
+            "admin_help_mg_6",
+            "admin_help_mg_7",
+            "admin_help_mg_8",
+            "admin_help_mg_9",
+            "admin_help_mg_10",
+            "admin_help_mg_11",
+        )
 
     help_topics = admin_help_topics(bot)
 
@@ -222,6 +688,8 @@ def reply_admin_help(bot, context, topic: str = "") -> None:
             reply(bot, context, bot.tr(key))
         return
 
+    if normalized_topic in {"mondgesicht", "moonface"}:
+        normalized_topic = "mg"
     if normalized_topic in {"cap", "caps", "capability", "capabilities"}:
         normalized_topic = "cap"
     if normalized_topic in {"reload", "reloadplugins"}:
@@ -272,7 +740,7 @@ def require_admin(bot, context, require_raw: bool = False):
 
 
 def render_roles(bot) -> str:
-    roles = bot.list_admin_roles()
+    roles = list_admin_roles(bot)
     if not roles:
         return bot.tr("admin_roles_empty")
 
@@ -286,7 +754,7 @@ def render_roles(bot) -> str:
 
 
 def render_users(bot) -> str:
-    users = bot.list_admin_users()
+    users = list_admin_users(bot)
     if not users:
         return bot.tr("admin_users_empty")
 
@@ -313,29 +781,7 @@ def is_prefixed_admin_message(context) -> bool:
         return False
 
     token = without_prefix.split(maxsplit=1)[0]
-    return token in {
-        "admin",
-        "login",
-        "logout",
-        "whoami",
-        "listroles",
-        "listusers",
-        "roleadd",
-        "roleflag",
-        "adduser",
-        "deluser",
-        "setrole",
-        "rolemode",
-        "rolemode-del",
-        "usermode",
-        "usermode-del",
-        "apply",
-        "rssannounce",
-        "rsschannel",
-        "raw",
-        "caps",
-        "reloadplugins",
-    }
+    return token in ADMIN_COMMANDS
 
 
 def parse_pm_admin_message(message: str) -> tuple[str, str] | None:
@@ -354,29 +800,7 @@ def parse_pm_admin_message(message: str) -> tuple[str, str] | None:
         nested_parts = nested.split(maxsplit=1)
         return nested_parts[0].lower(), nested_parts[1] if len(nested_parts) > 1 else ""
 
-    if command in {
-        "help",
-        "login",
-        "logout",
-        "whoami",
-        "listroles",
-        "listusers",
-        "roleadd",
-        "roleflag",
-        "adduser",
-        "deluser",
-        "setrole",
-        "rolemode",
-        "rolemode-del",
-        "usermode",
-        "usermode-del",
-        "apply",
-        "rssannounce",
-        "rsschannel",
-        "raw",
-        "caps",
-        "reloadplugins",
-    }:
+    if command in ADMIN_COMMANDS:
         return command, rest
 
     return None
@@ -422,7 +846,7 @@ def handle_admin_roleadd(bot, context, parts: list[str]) -> None:
         if key.lower() == "raw":
             can_raw = parsed
 
-    _, message = bot.create_admin_role(role_name, is_admin=is_admin, can_raw=can_raw)
+    _, message = create_admin_role(bot, role_name, is_admin=is_admin, can_raw=can_raw)
     reply(bot, context, message)
 
 
@@ -436,7 +860,7 @@ def handle_admin_roleflag(bot, context, parts: list[str]) -> None:
         reply_admin_usage(bot, context, "admin_usage_roleflag")
         return
 
-    _, message = bot.set_role_flag(parts[1], parts[2], enabled)
+    _, message = set_role_flag(bot, parts[1], parts[2], enabled)
     reply(bot, context, message)
 
 
@@ -485,7 +909,8 @@ def handle_admin_user_command(bot, context, parts: list[str], source_mask: str) 
             reply_admin_usage(bot, context, "admin_usage_adduser")
             return True
         role_name = parts[4] if len(parts) >= 5 else "user"
-        _, message = bot.create_admin_user(
+        _, message = create_admin_user(
+            bot,
             display_name=parts[1],
             user_mask=parts[2],
             password=parts[3],
@@ -499,7 +924,7 @@ def handle_admin_user_command(bot, context, parts: list[str], source_mask: str) 
         if len(parts) != 2:
             reply_admin_usage(bot, context, "admin_usage_deluser")
             return True
-        _, message = bot.delete_admin_user(parts[1])
+        _, message = delete_admin_user(bot, parts[1])
         reply(bot, context, message)
         return True
 
@@ -507,7 +932,7 @@ def handle_admin_user_command(bot, context, parts: list[str], source_mask: str) 
         if len(parts) != 3:
             reply_admin_usage(bot, context, "admin_usage_setrole")
             return True
-        _, message = bot.set_admin_user_role(parts[1], parts[2])
+        _, message = set_admin_user_role(bot, parts[1], parts[2])
         reply(bot, context, message)
         return True
 
@@ -521,7 +946,7 @@ def handle_admin_mode_command(bot, context, parts: list[str]) -> bool:
         if len(parts) != 4:
             reply_admin_usage(bot, context, "admin_usage_rolemode")
             return True
-        _, message = bot.set_role_channel_mode(parts[1], parts[2], parts[3], enabled=subcommand == "rolemode")
+        _, message = set_role_channel_mode(bot, parts[1], parts[2], parts[3], enabled=subcommand == "rolemode")
         reply(bot, context, message)
         return True
 
@@ -529,7 +954,7 @@ def handle_admin_mode_command(bot, context, parts: list[str]) -> bool:
         if len(parts) != 4:
             reply_admin_usage(bot, context, "admin_usage_usermode")
             return True
-        _, message = bot.set_user_channel_mode(parts[1], parts[2], parts[3], enabled=subcommand == "usermode")
+        _, message = set_user_channel_mode(bot, parts[1], parts[2], parts[3], enabled=subcommand == "usermode")
         reply(bot, context, message)
         return True
 
@@ -577,7 +1002,7 @@ def parse_rssannounce_channels_arg(requested: str) -> tuple[str, list[str] | Non
 
 
 def current_rssannounce_channels(bot) -> list[str]:
-    return [str(channel).strip().lower() for channel in (bot.get_rss_announce_channels() or ()) if str(channel).strip()]
+    return [str(channel).strip().lower() for channel in (get_rss_announce_channels(bot) or ()) if str(channel).strip()]
 
 
 def target_rssannounce_channels(bot, mode: str, parsed_channels: list[str]) -> list[str]:
@@ -686,7 +1111,7 @@ def handle_admin_rss_command(bot, context, parts: list[str]) -> bool:
 
     target_channels = target_rssannounce_channels(bot, mode, parsed_channels)
 
-    ok, error = bot.set_rss_announce_channels(target_channels)
+    ok, error = set_rss_announce_channels(bot, target_channels)
     if not ok:
         reply(bot, context, bot.tr("admin_rssannounce_save_failed", error=error))
         return True
@@ -844,10 +1269,394 @@ def handle_raw(bot, context, arg: str) -> None:
     reply(bot, context, bot.tr("admin_raw_sent"))
 
 
+def normalize_user_mask(mask: str) -> str | None:
+    raw = mask.strip()
+    if raw.count("@") != 1:
+        return None
+    ident, host = raw.split("@", 1)
+    ident = ident.strip().lower()
+    host = host.strip().lower()
+    if not ident or not host:
+        return None
+    return f"{ident}@{host}"
+
+
+def normalize_role_name(role_name: str) -> str | None:
+    role = role_name.strip().lower()
+    if not role or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", role):
+        return None
+    return role
+
+
+def normalize_channel_name(channel: str) -> str:
+    return channel.strip().lower()
+
+
+def normalize_member_mode(bot, mode_or_prefix: str) -> str | None:
+    token = mode_or_prefix.strip()
+    if len(token) == 2 and token[0] in {"+", "-"}:
+        token = token[1:]
+    if len(token) != 1:
+        return None
+    server_prefix_modes = getattr(bot, "server_prefix_modes", {})
+    if token in server_prefix_modes:
+        return token
+    for mode, prefix in server_prefix_modes.items():
+        if prefix == token:
+            return mode
+    return None
+
+
+def hash_admin_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
+    salt = os.urandom(16).hex() if salt_hex is None else salt_hex
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        200000,
+    ).hex()
+    return salt, derived
+
+
+def verify_admin_password(password: str, salt_hex: str, expected_hash: str) -> bool:
+    _, derived = hash_admin_password(password, salt_hex)
+    return hmac.compare_digest(derived, expected_hash)
+
+
+def ensure_default_admin_role(bot) -> None:
+    if pymysql is None:
+        return
+    conn = bot.open_db_connection()
+    if conn is None:
+        return
+    try:
+        AdminRepository(conn, bot.config.network_key).ensure_default_role(bot.current_time_string())
+    finally:
+        conn.close()
+
+
+def load_admin_user(bot, user_mask: str) -> dict[str, object] | None:
+    normalized_mask = normalize_user_mask(user_mask)
+    if normalized_mask is None:
+        return None
+    if pymysql is None:
+        return None
+    conn = bot.open_db_connection()
+    if conn is None:
+        return None
+    try:
+        return AdminRepository(conn, bot.config.network_key).load_user(normalized_mask)
+    finally:
+        conn.close()
+
+
+def create_admin_role(bot, role_name: str, is_admin: bool = False, can_raw: bool = False) -> tuple[bool, str]:
+    normalized_role = normalize_role_name(role_name)
+    if normalized_role is None:
+        return False, "Ungültiger Rollenname. Erlaubt sind a-z, 0-9, _ und - ."
+    if pymysql is None:
+        return False, "pymysql missing"
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False, "DB connection failed"
+    try:
+        repo = AdminRepository(conn, bot.config.network_key)
+        if not repo.create_role(normalized_role, is_admin, can_raw, bot.current_time_string()):
+            return False, f"Rolle {normalized_role} existiert bereits."
+        return True, f"Rolle {normalized_role} angelegt."
+    except Exception as exc:
+        return False, f"Rolle konnte nicht angelegt werden: {exc}"
+    finally:
+        conn.close()
+
+
+def set_role_flag(bot, role_name: str, flag_name: str, enabled: bool) -> tuple[bool, str]:
+    normalized_role = normalize_role_name(role_name)
+    allowed_columns = {"admin": "is_admin", "raw": "can_raw"}
+    column = allowed_columns.get(flag_name.strip().lower())
+    if normalized_role is None or column is None:
+        return False, "Ungültige Rolle oder Flag. Erlaubte Flags: admin, raw."
+    if pymysql is None:
+        return False, "pymysql missing"
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False, "DB connection failed"
+    try:
+        repo = AdminRepository(conn, bot.config.network_key)
+        if not repo.set_role_flag(normalized_role, flag_name, enabled):
+            return False, f"Rolle {normalized_role} existiert nicht."
+        return True, f"Flag {flag_name.lower()} fuer Rolle {normalized_role} ist jetzt {'an' if enabled else 'aus'}."
+    except Exception as exc:
+        return False, f"Rollenflag konnte nicht gesetzt werden: {exc}"
+    finally:
+        conn.close()
+
+
+def list_admin_roles(bot) -> list[dict[str, object]]:
+    if pymysql is None:
+        return []
+    conn = bot.open_db_connection()
+    if conn is None:
+        return []
+    try:
+        return AdminRepository(conn, bot.config.network_key).list_roles()
+    finally:
+        conn.close()
+
+
+def create_admin_user(bot, display_name: str, user_mask: str, password: str, role_name: str, created_by: str) -> tuple[bool, str]:
+    normalized_mask = normalize_user_mask(user_mask)
+    normalized_role = normalize_role_name(role_name)
+    label = display_name.strip()[:64]
+    if normalized_mask is None:
+        return False, "Ungültige Hostmask. Erwartet wird ident@host."
+    if normalized_role is None:
+        return False, "Ungültiger Rollenname."
+    if not password:
+        return False, "Passwort darf nicht leer sein."
+    if pymysql is None:
+        return False, "pymysql missing"
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False, "DB connection failed"
+    try:
+        salt_hex, hash_hex = hash_admin_password(password)
+        repo = AdminRepository(conn, bot.config.network_key)
+        created, message = repo.create_user(
+            label, normalized_mask, salt_hex, hash_hex, normalized_role,
+            bot.current_time_string(), created_by
+        )
+        if not created:
+            if message == "role_missing":
+                return False, f"Rolle {normalized_role} existiert nicht."
+            if message == "user_exists":
+                return False, f"Benutzer {normalized_mask} existiert bereits."
+            return False, f"Benutzer konnte nicht angelegt werden: {message}"
+        return True, f"Benutzer {normalized_mask} mit Rolle {normalized_role} angelegt."
+    except Exception as exc:
+        return False, f"Benutzer konnte nicht angelegt werden: {exc}"
+    finally:
+        conn.close()
+
+
+def delete_admin_user(bot, user_mask: str) -> tuple[bool, str]:
+    normalized_mask = normalize_user_mask(user_mask)
+    if normalized_mask is None:
+        return False, "Ungültige Hostmask."
+    if pymysql is None:
+        return False, "pymysql missing"
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False, "DB connection failed"
+    try:
+        repo = AdminRepository(conn, bot.config.network_key)
+        if not repo.delete_user(normalized_mask):
+            return False, f"Benutzer {normalized_mask} existiert nicht."
+        bot._admin_sessions.pop(normalized_mask, None)
+        return True, f"Benutzer {normalized_mask} geloescht."
+    except Exception as exc:
+        return False, f"Benutzer konnte nicht geloescht werden: {exc}"
+    finally:
+        conn.close()
+
+
+def set_admin_user_role(bot, user_mask: str, role_name: str) -> tuple[bool, str]:
+    normalized_mask = normalize_user_mask(user_mask)
+    normalized_role = normalize_role_name(role_name)
+    if normalized_mask is None or normalized_role is None:
+        return False, "Ungültige Hostmask oder Rolle."
+    if pymysql is None:
+        return False, "pymysql missing"
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False, "DB connection failed"
+    try:
+        repo = AdminRepository(conn, bot.config.network_key)
+        if not repo.set_user_role(normalized_mask, normalized_role):
+            return False, "Rolle konnte nicht gesetzt werden."
+        return True, f"Benutzer {normalized_mask} hat jetzt Rolle {normalized_role}."
+    except Exception as exc:
+        return False, f"Rolle konnte nicht gesetzt werden: {exc}"
+    finally:
+        conn.close()
+
+
+def list_admin_users(bot) -> list[dict[str, object]]:
+    if pymysql is None:
+        return []
+    conn = bot.open_db_connection()
+    if conn is None:
+        return []
+    try:
+        return AdminRepository(conn, bot.config.network_key).list_users()
+    finally:
+        conn.close()
+
+
+def set_role_channel_mode(bot, role_name: str, channel: str, mode_or_prefix: str, enabled: bool) -> tuple[bool, str]:
+    normalized_role = normalize_role_name(role_name)
+    normalized_channel = normalize_channel_name(channel)
+    mode = normalize_member_mode(bot, mode_or_prefix)
+    if normalized_role is None or not normalized_channel.startswith("#") or mode is None:
+        return False, "Ungültige Rolle, Channel oder Modus."
+    if pymysql is None:
+        return False, "pymysql missing"
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False, "DB connection failed"
+    try:
+        repo = AdminRepository(conn, bot.config.network_key)
+        repo.set_role_channel_mode(normalized_role, normalized_channel, mode, bot.current_time_string(), enabled)
+        action = "gesetzt" if enabled else "entfernt"
+        return True, f"Rollenrecht {normalized_role} {normalized_channel} +{mode} {action}."
+    except Exception as exc:
+        return False, f"Rollenrecht konnte nicht gespeichert werden: {exc}"
+    finally:
+        conn.close()
+
+
+def set_user_channel_mode(bot, user_mask: str, channel: str, mode_or_prefix: str, enabled: bool) -> tuple[bool, str]:
+    normalized_mask = normalize_user_mask(user_mask)
+    normalized_channel = normalize_channel_name(channel)
+    mode = normalize_member_mode(bot, mode_or_prefix)
+    if normalized_mask is None or not normalized_channel.startswith("#") or mode is None:
+        return False, "Ungültige Hostmask, Channel oder Modus."
+    if pymysql is None:
+        return False, "pymysql missing"
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False, "DB connection failed"
+    try:
+        repo = AdminRepository(conn, bot.config.network_key)
+        repo.set_user_channel_mode(normalized_mask, normalized_channel, mode, bot.current_time_string(), enabled)
+        action = "gesetzt" if enabled else "entfernt"
+        return True, f"Benutzerrecht {normalized_mask} {normalized_channel} +{mode} {action}."
+    except Exception as exc:
+        return False, f"Benutzerrecht konnte nicht gespeichert werden: {exc}"
+    finally:
+        conn.close()
+
+
+def get_configured_user_channel_modes(bot, user_mask: str, channel: str) -> tuple[str, ...]:
+    normalized_mask = normalize_user_mask(user_mask)
+    normalized_channel = normalize_channel_name(channel)
+    if normalized_mask is None or not normalized_channel:
+        return ()
+    if pymysql is None:
+        return ()
+    conn = bot.open_db_connection()
+    if conn is None:
+        return ()
+    try:
+        return AdminRepository(conn, bot.config.network_key).get_configured_user_channel_modes(normalized_mask, normalized_channel)
+    finally:
+        conn.close()
+
+
+def get_user_assigned_channels(bot, user_mask: str) -> set[str]:
+    normalized_mask = normalize_user_mask(user_mask)
+    if normalized_mask is None:
+        return set()
+    if pymysql is None:
+        return set()
+    conn = bot.open_db_connection()
+    if conn is None:
+        return set()
+    try:
+        return AdminRepository(conn, bot.config.network_key).get_user_assigned_channels(normalized_mask)
+    finally:
+        conn.close()
+
+
+def ensure_admin_tables(db_conn, network_key, current_time):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_admin_roles (
+                network VARCHAR(255) NOT NULL,
+                role_name VARCHAR(64) NOT NULL,
+                is_admin TINYINT(1) NOT NULL DEFAULT 0,
+                can_raw TINYINT(1) NOT NULL DEFAULT 0,
+                created_at VARCHAR(32) NOT NULL,
+                PRIMARY KEY (network, role_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_admin_users (
+                network VARCHAR(255) NOT NULL,
+                user_mask VARCHAR(255) NOT NULL,
+                display_name VARCHAR(64) NOT NULL DEFAULT '',
+                password_salt VARCHAR(64) NOT NULL,
+                password_hash VARCHAR(128) NOT NULL,
+                role_name VARCHAR(64) NOT NULL,
+                created_at VARCHAR(32) NOT NULL,
+                created_by VARCHAR(64) NOT NULL DEFAULT '',
+                PRIMARY KEY (network, user_mask),
+                KEY idx_bot_admin_users_role (network, role_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_admin_role_modes (
+                network VARCHAR(255) NOT NULL,
+                role_name VARCHAR(64) NOT NULL,
+                channel VARCHAR(128) NOT NULL,
+                mode CHAR(1) NOT NULL,
+                created_at VARCHAR(32) NOT NULL,
+                PRIMARY KEY (network, role_name, channel, mode)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_admin_user_modes (
+                network VARCHAR(255) NOT NULL,
+                user_mask VARCHAR(255) NOT NULL,
+                channel VARCHAR(128) NOT NULL,
+                mode CHAR(1) NOT NULL,
+                created_at VARCHAR(32) NOT NULL,
+                PRIMARY KEY (network, user_mask, channel, mode)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+
+def has_admin_users(bot) -> bool:
+    if pymysql is None:
+        return False
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM bot_admin_users WHERE network = %s LIMIT 1",
+                (bot.config.network_key,),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
 PLUGIN = PluginSpec(
     name="admin",
     translations=MESSAGES,
     message_handlers=(
         MessageHandlerSpec(handler=handle_admin_message),
     ),
+    hooks={
+        "ensure_tables": ensure_admin_tables,
+        "load_admin_user": load_admin_user,
+        "ensure_default_admin_role": ensure_default_admin_role,
+        "hash_admin_password": hash_admin_password,
+        "create_admin_user": create_admin_user,
+        "get_user_assigned_channels": get_user_assigned_channels,
+        "get_configured_user_channel_modes": get_configured_user_channel_modes,
+        "has_admin_users": has_admin_users,
+    },
 )

@@ -29,7 +29,9 @@
       "nick_protection_nick": "",
       "nick_reclaim_interval_seconds": 60,
       "nickserv_password": "",
-      "nickserv_identify_command": "PRIVMSG NickServ :IDENTIFY {password}"
+      "nickserv_identify_command": "PRIVMSG NickServ :IDENTIFY {password}",
+      "mondgesicht_url_enabled": false,
+      "mondgesicht_url": "https://example.invalid/mondgesicht?channel={channel_url}&lang=de&enabled=1"
     },
     {
       "enabled": false,
@@ -70,10 +72,6 @@
   "weather_default_location": "",
   "weather_appid": "<your-openweather-appid>",
   "youtube_api_key": "",
-  "rss_feeds": {
-    "midiandmore": "https://www.midiandmore.net/Community/news-rss.jsp"
-  },
-  "rss_announce_channel": "",
   "enabled_plugins": [],
   "disabled_plugins": [],
   "raw_chat_logging_enabled": false,

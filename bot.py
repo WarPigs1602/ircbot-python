@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
+import importlib
+import inspect
 import json
 import base64
 import argparse
@@ -30,9 +34,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, quote_plus, urlparse
 from urllib.request import Request, urlopen
 
-from plugin_system import MessageContext, PluginManager
+from plugins.url_service import URLService
+
 try:
-    from version_info import version_line
+    _version_info = importlib.import_module("version_info")
+    version_line = _version_info.version_line
 except ModuleNotFoundError:
     _REPOSITORY_URL = "https://github.com/WarPigs1602/ircbot-python"
 
@@ -62,98 +68,15 @@ except ModuleNotFoundError:
         return f"Python IRC Bot {_detect_version_fallback()} | GitHub: {_REPOSITORY_URL}"
 
 try:
-    import pymysql
+    pymysql = importlib.import_module("pymysql")
 except ImportError:
     pymysql = None
 
 
-URL_PATTERN = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
-SPAM_WORDS = (
-    "casino",
-    "viagra",
-    "porn",
-    "xxx",
-    "sex",
-    "adult",
-    "pharmacy",
-    "loan",
-    "crypto",
-    "bitcoin",
-    "bet",
-    "bonus",
-    "click",
-    "free money",
-    "win money",
-)
-SPAM_HOSTS = (
-    "bit.ly",
-    "tinyurl.com",
-    "t.co",
-    "goo.gl",
-    "is.gd",
-    "cutt.ly",
-    "rebrand.ly",
-)
+from plugin_system import MessageContext, PluginManager
 
-DANGEROUS_CONTENT_TYPES = frozenset({
-    # Generic binaries
-    "application/octet-stream",
-    # Windows executables / installers
-    "application/x-msdownload",
-    "application/x-ms-dos-executable",
-    "application/vnd.microsoft.portable-executable",
-    "application/x-executable",
-    "application/x-msi",
-    "application/x-msdos-program",
-    # Scripts
-    "application/x-sh",
-    "application/x-csh",
-    "application/x-bash",
-    "application/x-perl",
-    "application/x-python-code",
-    "text/x-sh",
-    "text/x-bash",
-    "text/x-perl",
-    "text/x-python",
-    "text/x-ruby",
-    "application/x-ruby",
-    "application/x-bat",
-    "application/x-powershell",
-    "text/x-powershell",
-    # Archives / compressed
-    "application/zip",
-    "application/x-zip-compressed",
-    "application/x-rar-compressed",
-    "application/vnd.rar",
-    "application/x-7z-compressed",
-    "application/x-tar",
-    "application/x-gzip",
-    "application/x-bzip2",
-    "application/x-xz",
-    "application/zstd",
-    "application/x-lzma",
-    # JVM / mobile
-    "application/java-archive",
-    "application/x-java-archive",
-    "application/vnd.android.package-archive",
-    # macOS
-    "application/x-apple-diskimage",
-    "application/x-macos-pkg",
-    # Linux packages
-    "application/x-deb",
-    "application/x-rpm",
-    # Office macros / legacy formats
-    "application/vnd.ms-excel.sheet.macroEnabled.12",
-    "application/vnd.ms-word.document.macroEnabled.12",
-    "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
-    "application/vnd.ms-office",
-    # Flash (legacy, still seen in the wild)
-    "application/x-shockwave-flash",
-    # HTA / CHM
-    "application/x-ms-application",
-    "application/x-ms-xbap",
-    "application/vnd.ms-htmlhelp",
-})
+
+URL_PATTERN = re.compile(r'https?://[^\s<>"]+', re.IGNORECASE)
 
 DEFAULT_PREFIX_MODES = {
     "q": "~",
@@ -167,18 +90,9 @@ ROLE_FLAG_COLUMNS = {
     "admin": "is_admin",
     "raw": "can_raw",
 }
-INVALID_HOSTMASK_MESSAGE = "Ungültige Hostmask."
-INVALID_CHANNEL_MESSAGE = "Ungültiger Channel."
+INVALID_HOSTMASK_MESSAGE = "Invalid hostmask. Expected format: ident@host."
+INVALID_CHANNEL_MESSAGE = "Invalid channel."
 ROLE_EXISTS_QUERY = "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1"
-RSS_ANNOUNCE_CHANNELS_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS bot_rss_announce_channels (
-    network VARCHAR(255) NOT NULL,
-    channel VARCHAR(128) NOT NULL,
-    updated_at VARCHAR(32) NOT NULL,
-    PRIMARY KEY (network, channel),
-    KEY idx_bot_rss_announce_channels_lookup (network, updated_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-"""
 CONFIG_FILE_NAME = "config.json"
 CONFIG_MISSING_MESSAGE = "config.json fehlt / is missing. Kopiere config.example.json zu config.json und passe die Werte an."
 SASL_RESULT_COMMANDS = frozenset({"900", "902", "903", "904", "905", "906", "907", "908"})
@@ -203,15 +117,12 @@ class BotConfig:
     mysql_user: str = "root"
     mysql_password: str = ""
     mysql_database: str = "nullbot"
-    weather_default_location: str = ""
-    weather_appid: str = ""
-    youtube_api_key: str = ""
     perform: list[str] | None = None
     sasl_enabled: bool = False
     sasl_username: str = ""
     sasl_password: str = ""
     sasl_authzid: str = ""
-    language: str = "de"
+    language: str = "en"
     flood_protection_enabled: bool = True
     flood_burst: int = 4
     flood_window_seconds: float = 2.0
@@ -228,8 +139,6 @@ class BotConfig:
     url_timeout_seconds: float = 3.0
     url_sniff_max_bytes: int = 65536
     url_max_content_length_bytes: int = 2097152
-    rss_feeds: dict[str, str] | None = None
-    rss_announce_channel: str = ""
     enabled_plugins: list[str] | None = None
     disabled_plugins: list[str] | None = None
 
@@ -247,8 +156,8 @@ class BotConfig:
         else:
             perform_list = []
 
-        language_raw = str(raw.get("language", "de")).strip().lower()
-        language = language_raw if language_raw in {"de", "en"} else "de"
+        language_raw = str(raw.get("language", "en")).strip().lower()
+        language = language_raw if language_raw in {"de", "en"} else "en"
 
         def _parse_string_list(value: object) -> list[str]:
             if isinstance(value, str):
@@ -288,9 +197,6 @@ class BotConfig:
             mysql_user=str(raw.get("mysql_user", "root")),
             mysql_password=str(raw.get("mysql_password", "")),
             mysql_database=str(raw.get("mysql_database", "nullbot")),
-            weather_default_location=str(raw.get("weather_default_location", "")),
-            weather_appid=str(raw.get("weather_appid", "")).strip(),
-            youtube_api_key=str(raw.get("youtube_api_key", "")),
             perform=perform_list,
             sasl_enabled=bool(raw.get("sasl_enabled", False)),
             sasl_username=str(raw.get("sasl_username", "")),
@@ -313,8 +219,6 @@ class BotConfig:
             url_timeout_seconds=max(0.5, float(raw.get("url_timeout_seconds", 3.0))),
             url_sniff_max_bytes=max(1024, int(raw.get("url_sniff_max_bytes", 65536))),
             url_max_content_length_bytes=max(65536, int(raw.get("url_max_content_length_bytes", 2097152))),
-            rss_feeds=_parse_string_dict(raw.get("rss_feeds", {})),
-            rss_announce_channel=str(raw.get("rss_announce_channel", "")).strip(),
             enabled_plugins=_parse_string_list(raw.get("enabled_plugins", [])),
             disabled_plugins=_parse_string_list(raw.get("disabled_plugins", [])),
         )
@@ -340,7 +244,9 @@ class BotConfig:
             merged = dict(base)
             merged.update(network_raw)
             try:
-                configs.append(BotConfig._from_raw(merged))
+                config = BotConfig._from_raw(merged)
+                config.raw_config = merged
+                configs.append(config)
             except KeyError as exc:
                 missing_key = exc.args[0]
                 raise ValueError(f"networks[{index - 1}] fehlt Pflichtfeld: {missing_key}") from exc
@@ -359,9 +265,118 @@ class BotConfig:
     def display_name(self) -> str:
         return f"{self.server}:{self.port}"
 
+
+class DatabaseConnection:
+    def __init__(self, host, port, user, password, database):
+        self.host = host
+        self.port = port
+        self.user = user
+        self.password = password
+        self.database = database
+
+    def open(self, with_database=True):
+        if pymysql is None:
+            return None
+
+        def connect(password_value):
+            db = self.database if with_database else None
+            return pymysql.connect(
+                host=self.host,
+                port=self.port,
+                user=self.user,
+                password=password_value,
+                database=db,
+                charset="utf8mb4",
+                autocommit=True,
+                connect_timeout=5,
+                cursorclass=pymysql.cursors.DictCursor,
+            )
+
+        try:
+            return connect(self.password)
+        except UnicodeEncodeError:
+            try:
+                return connect(self.password.encode("utf-8"))
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def open_db(self):
+        return self.open(with_database=True)
+
+    def open_server(self):
+        return self.open(with_database=False)
+
+
+def create_database(db_conn, db_name):
+    if not db_name or not all(c.isalnum() or c == "_" for c in db_name):
+        raise ValueError(f"Invalid database name: {db_name}")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+        )
+
+
+class ChannelRepository:
+    def __init__(self, db_conn, network_key):
+        self.db_conn = db_conn
+        self.network_key = network_key
+
+    def load_saved(self):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("SELECT channel FROM bot_channels WHERE network = %s ORDER BY channel ASC", (self.network_key,))
+                rows = cur.fetchall() or []
+            return [str(row.get("channel", "")).strip() for row in rows if str(row.get("channel", "")).strip()]
+        except Exception:
+            return []
+
+    def store_if_missing(self, channel, current_time):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT IGNORE INTO bot_channels (network, channel, joined_at) VALUES (%s, %s, %s)",
+                    (self.network_key, channel, current_time),
+                )
+        except Exception:
+            pass
+
+    def delete(self, channel):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("DELETE FROM bot_channels WHERE network = %s AND channel = %s", (self.network_key, channel))
+        except Exception:
+            pass
+
+
+def ensure_tables(bot, db_conn, network_key, current_time):
+    for hook in bot.plugin_manager.get_hooks("ensure_tables"):
+        try:
+            sig = inspect.signature(hook)
+            if len(sig.parameters) >= 3:
+                hook(db_conn, network_key, current_time)
+            else:
+                hook(db_conn)
+        except Exception as exc:
+            print(f"Table setup failed: {exc}")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_channels (
+                network VARCHAR(255) NOT NULL,
+                channel VARCHAR(128) NOT NULL,
+                joined_at VARCHAR(32) NOT NULL,
+                PRIMARY KEY (network, channel)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+
 class IRCBot:
-    def __init__(self, config: BotConfig) -> None:
+    def __init__(self, config: BotConfig, configured_peer_nicks: Iterable[str] | None = None) -> None:
         self.config = config
+        self.raw_config = getattr(config, "raw_config", {})
         self.sock: socket.socket | None = None
         self.file = None
         self.seen_sniffed_urls: set[str] = set()
@@ -396,20 +411,33 @@ class IRCBot:
         self._runtime_stop_event = threading.Event()
         self._plugin_tick_thread: threading.Thread | None = None
         self._url_service = None
-        self.spam_words = SPAM_WORDS
-        self.spam_hosts = SPAM_HOSTS
-        self.dangerous_content_types = DANGEROUS_CONTENT_TYPES
-        self.plugin_manager = PluginManager(self, Path(__file__).resolve().parent / "plugins")
+        self.configured_peer_nicks = {nick.lower() for nick in (configured_peer_nicks or [])}
+        self._pending_part_checks: dict[str, float] = {}
+        self.plugin_manager = PluginManager(
+            self, Path(__file__).resolve().parent / "plugins"
+        )
+        self.plugin_manager.call_config_hooks(self)
+        self._db_connection = None
+
+    @property
+    def db(self):
+        if self._db_connection is None:
+            self._db_connection = DatabaseConnection(
+                host=self.config.mysql_host,
+                port=self.config.mysql_port,
+                user=self.config.mysql_user,
+                password=self.config.mysql_password,
+                database=self.config.mysql_database,
+            )
+        return self._db_connection
 
     def _get_url_service(self):
         if self._url_service is None:
-            from plugins.url_service import URLService
-
             self._url_service = URLService()
         return self._url_service
 
     def tr(self, key: str, **kwargs) -> str:
-        language = self.config.language if self.config.language in {"de", "en"} else "de"
+        language = self.config.language if self.config.language in {"de", "en"} else "en"
         core_messages = {
             "de": {
                 "not_connected": "Nicht verbunden",
@@ -424,6 +452,9 @@ class IRCBot:
                 "admin_bootstrap_prompt": "Erststart für {network}: initialen Admin anlegen.",
                 "admin_bootstrap_created": "Initialer Admin {mask} wurde für Netzwerk {network} angelegt.",
                 "admin_bootstrap_skipped": "Admin-Bootstrap übersprungen. Ohne Admin sind keine Verwaltungsbefehle verfügbar.",
+                "admin_prompt_mask": "Admin ident@host: ",
+                "admin_prompt_password": "Admin Passwort: ",
+                "admin_prompt_password_confirm": "Passwort wiederholen: ",
                 "weather_appid_missing": "Weather-App-ID fehlt. Bitte weather_appid in der Konfiguration setzen.",
                 "config_missing": "config.json fehlt. Kopiere config.example.json zu config.json und passe die Werte an.",
                 "connecting": "Verbinde zu {server}:{port} (TLS={tls}) ...",
@@ -431,6 +462,83 @@ class IRCBot:
                 "network_error": "Netzwerkfehler: {error}",
                 "shutting_down": "Beende Bot.",
                 "reconnect_in": "Reconnect in {seconds} Sekunden ...",
+                "bot_part_other_bot_present": "Verlasse {channel}, da bereits ein anderer konfigurierter Bot ({nick}) anwesend ist.",
+                "invalid_hostmask": "Ungültige Hostmask. Erwartet wird ident@host.",
+                "invalid_channel": "Ungültiger Channel.",
+                "invalid_nick": "Ungültiger Nick.",
+                "admin_password_empty": "Passwort darf nicht leer sein.",
+                "admin_password_mismatch": "Passwörter stimmen nicht überein.",
+                "admin_password_wrong": "Passwort falsch.",
+                "admin_login_success": "Login erfolgreich für {mask}.",
+                "admin_channel_modes_applied": "Höchste Channel-Rechte gesetzt: {applied_count}.",
+                "admin_help_header": "--- Admin-Befehle ---",
+                "admin_role_admin_on": "Admin-Flag für Rolle {role} ist jetzt an.",
+                "admin_role_admin_off": "Admin-Flag für Rolle {role} ist jetzt aus.",
+                "admin_role_raw_on": "RAW-Flag für Rolle {role} ist jetzt an.",
+                "admin_role_raw_off": "RAW-Flag für Rolle {role} ist jetzt aus.",
+                "admin_role_created": "Rolle {role} angelegt.",
+                "admin_role_exists": "Rolle {role} existiert bereits.",
+                "admin_role_missing": "Rolle {role} existiert nicht.",
+                "admin_user_created": "Benutzer {mask} mit Rolle {role} angelegt.",
+                "admin_user_exists": "Benutzer {mask} existiert bereits.",
+                "admin_user_deleted": "Benutzer {mask} gelöscht.",
+                "admin_user_not_found": "Benutzer {mask} nicht gefunden.",
+                "admin_role_set": "Rolle {role} für {mask} gesetzt.",
+                "admin_no_configured_modes": "Keine Rechte für {mask} in {channel} konfiguriert.",
+                "admin_modes_set": "Rollenrecht {role} {channel} +{mode} gesetzt.",
+                "admin_modes_removed": "Rollenrecht {role} {channel} +{mode} entfernt.",
+                "admin_user_modes_set": "Benutzerrecht {mask} {channel} +{mode} gesetzt.",
+                "admin_user_modes_removed": "Benutzerrecht {mask} {channel} +{mode} entfernt.",
+                "admin_session_expired": "Admin-Session abgelaufen.",
+                "admin_session_revoked": "Admin-Session widerrufen.",
+                "admin_access_denied": "Zugriff verweigert.",
+                "admin_usage": "Nutzung: {prefix}{command} <subcommand> [args...]",
+                "admin_invalid_role": "Ungültiger Rollenname. Erlaubt sind a-z, 0-9, _ und -.",
+                "admin_invalid_channel": "Ungültiger Channel.",
+                "admin_invalid_mode": "Ungültiger Modus.",
+                "admin_invalid_user_mask": "Ungültige Hostmask. Erwartet wird ident@host.",
+                "admin_db_unavailable": "Datenbank nicht erreichbar.",
+                "admin_pymysql_missing": "Python-Paket 'pymysql' fehlt. Bitte 'pip install -r requirements.txt' ausführen.",
+                "admin_command_not_found": "Befehl nicht gefunden.",
+                "admin_help_not_available": "Keine Hilfe verfügbar.",
+                "admin_raw_chat_logging_enabled": "RAW-Chat-Logging aktiviert.",
+                "admin_raw_chat_logging_disabled": "RAW-Chat-Logging deaktiviert.",
+                "no_running_bot": "Kein laufender Bot gefunden (PID-Datei fehlt oder ungueltig).",
+                "stopping_bots": "Beende Bots.",
+                "url_not_found": "URL nicht gefunden.",
+                "url_blocked": "URL geblockt (Spamverdacht).",
+                "url_dead": "URL ist tot oder keine HTML-Seite.",
+                "url_dangerous_file": "⚠ Sicherheitswarnung",
+                "url_too_large": "URL ist zu gross zum Sniffen.",
+                "url_max_id": "Max-ID {max_id}",
+                "url_error": "URL Fehler: {message}",
+                "url_no_html_topic": "{url} (kein HTML-Topic gefunden)",
+                "url_without_title_no_topic": "{url} (HTML-Seite ohne title oder Topic)",
+                "url_without_title": "{url} :: {topic} (ohne title)",
+                "url_requested_by_only": "angefragt von {requested_by}",
+                "url_first_posted_by_only": "zuerst gepostet von {posted_by}",
+                "url_first_posted_and_requested_by": "zuerst gepostet von {posted_by} | angefragt von {requested_by}",
+                "yt_prefix": "YouTube",
+                "yt_detail_channel_label": "Kanal",
+                "yt_detail_published_label": "Veröffentlicht",
+                "yt_detail_duration_label": "Dauer",
+                "yt_detail_views_label": "Aufrufe",
+                "yt_detail_likes_label": "Likes",
+                "yt_detail_comments_label": "Kommentare",
+                "yt_channel": "Kanal {channel}",
+                "yt_duration": "Dauer {duration}",
+                "yt_published": "veröffentlicht {published}",
+                "yt_views": "{count} Aufrufe",
+                "yt_likes": "{count} Likes",
+                "yt_comments": "{count} Kommentare",
+                "yt_api_no_metadata": "YouTube-API konnte keine Metadaten liefern.",
+                "yt_invalid_id": "Keine gueltige YouTube-Video-ID gefunden.",
+                "yt_missing_key": "YouTube-API-Key fehlt in der Konfiguration.",
+                "yt_api_unreachable": "YouTube-API nicht erreichbar.",
+                "unknown_error": "unbekannter Fehler",
+                "yt_no_data": "YouTube-API lieferte keine Video-Daten.",
+                "yt_no_title": "YouTube-API lieferte keinen Titel.",
+                "unknown": "unbekannt",
             },
             "en": {
                 "not_connected": "Not connected",
@@ -445,6 +553,9 @@ class IRCBot:
                 "admin_bootstrap_prompt": "First run for {network}: create the initial admin.",
                 "admin_bootstrap_created": "Initial admin {mask} was created for network {network}.",
                 "admin_bootstrap_skipped": "Admin bootstrap skipped. No administrative commands will be available until an admin is created.",
+                "admin_prompt_mask": "Admin ident@host: ",
+                "admin_prompt_password": "Admin password: ",
+                "admin_prompt_password_confirm": "Repeat password: ",
                 "weather_appid_missing": "Weather app ID is missing. Please set weather_appid in the configuration.",
                 "config_missing": "config.json is missing. Copy config.example.json to config.json and adjust values.",
                 "connecting": "Connecting to {server}:{port} (TLS={tls}) ...",
@@ -452,6 +563,83 @@ class IRCBot:
                 "network_error": "Network error: {error}",
                 "shutting_down": "Stopping bot.",
                 "reconnect_in": "Reconnect in {seconds} seconds ...",
+                "bot_part_other_bot_present": "Leaving {channel} because another configured bot ({nick}) is already present.",
+                "invalid_hostmask": "Invalid hostmask. Expected format: ident@host.",
+                "invalid_channel": "Invalid channel.",
+                "invalid_nick": "Invalid nick.",
+                "admin_password_empty": "Password cannot be empty.",
+                "admin_password_mismatch": "Passwords do not match.",
+                "admin_password_wrong": "Incorrect password.",
+                "admin_login_success": "Login successful for {mask}.",
+                "admin_channel_modes_applied": "Highest channel modes set: {applied_count}.",
+                "admin_help_header": "--- Admin Commands ---",
+                "admin_role_admin_on": "Admin flag for role {role} is now enabled.",
+                "admin_role_admin_off": "Admin flag for role {role} is now disabled.",
+                "admin_role_raw_on": "RAW flag for role {role} is now enabled.",
+                "admin_role_raw_off": "RAW flag for role {role} is now disabled.",
+                "admin_role_created": "Role {role} created.",
+                "admin_role_exists": "Role {role} already exists.",
+                "admin_role_missing": "Role {role} does not exist.",
+                "admin_user_created": "User {mask} with role {role} created.",
+                "admin_user_exists": "User {mask} already exists.",
+                "admin_user_deleted": "User {mask} deleted.",
+                "admin_user_not_found": "User {mask} not found.",
+                "admin_role_set": "Role {role} set for {mask}.",
+                "admin_no_configured_modes": "No modes configured for {mask} in {channel}.",
+                "admin_modes_set": "Role right {role} {channel} +{mode} set.",
+                "admin_modes_removed": "Role right {role} {channel} +{mode} removed.",
+                "admin_user_modes_set": "User right {mask} {channel} +{mode} set.",
+                "admin_user_modes_removed": "User right {mask} {channel} +{mode} removed.",
+                "admin_session_expired": "Admin session expired.",
+                "admin_session_revoked": "Admin session revoked.",
+                "admin_access_denied": "Access denied.",
+                "admin_usage": "Usage: {prefix}{command} <subcommand> [args...]",
+                "admin_invalid_role": "Invalid role name. Allowed: a-z, 0-9, _ and -.",
+                "admin_invalid_channel": "Invalid channel.",
+                "admin_invalid_mode": "Invalid mode.",
+                "admin_invalid_user_mask": "Invalid hostmask. Expected format: ident@host.",
+                "admin_db_unavailable": "Database unavailable.",
+                "admin_pymysql_missing": "Python package 'pymysql' is missing. Run 'pip install -r requirements.txt'.",
+                "admin_command_not_found": "Command not found.",
+                "admin_help_not_available": "No help available.",
+                "admin_raw_chat_logging_enabled": "RAW chat logging enabled.",
+                "admin_raw_chat_logging_disabled": "RAW chat logging disabled.",
+                "no_running_bot": "No running bot found (PID file missing or invalid).",
+                "stopping_bots": "Stopping bots.",
+                "url_not_found": "URL not found.",
+                "url_blocked": "URL blocked (suspected spam).",
+                "url_dead": "URL is dead or not an HTML page.",
+                "url_dangerous_file": "⚠ Security warning",
+                "url_too_large": "URL is too large to sniff.",
+                "url_max_id": "Max ID {max_id}",
+                "url_error": "URL error: {message}",
+                "url_no_html_topic": "{url} (no HTML topic found)",
+                "url_without_title_no_topic": "{url} (HTML page without title or topic)",
+                "url_without_title": "{url} :: {topic} (without title)",
+                "url_requested_by_only": "requested by {requested_by}",
+                "url_first_posted_by_only": "first posted by {posted_by}",
+                "url_first_posted_and_requested_by": "first posted by {posted_by} | requested by {requested_by}",
+                "yt_prefix": "YouTube",
+                "yt_detail_channel_label": "Channel",
+                "yt_detail_published_label": "Published",
+                "yt_detail_duration_label": "Duration",
+                "yt_detail_views_label": "Views",
+                "yt_detail_likes_label": "Likes",
+                "yt_detail_comments_label": "Comments",
+                "yt_channel": "Channel {channel}",
+                "yt_duration": "Duration {duration}",
+                "yt_published": "published {published}",
+                "yt_views": "{count} views",
+                "yt_likes": "{count} likes",
+                "yt_comments": "{count} comments",
+                "yt_api_no_metadata": "YouTube API returned no metadata.",
+                "yt_invalid_id": "No valid YouTube video ID found.",
+                "yt_missing_key": "YouTube API key is missing in config.",
+                "yt_api_unreachable": "YouTube API unavailable.",
+                "unknown_error": "unknown error",
+                "yt_no_data": "YouTube API returned no video data.",
+                "yt_no_title": "YouTube API returned no title.",
+                "unknown": "unknown",
             },
         }
         plugin_manager = getattr(self, "plugin_manager", None)
@@ -461,9 +649,9 @@ class IRCBot:
 
         template = plugin_template
         if template is None:
-            template = core_messages.get(language, core_messages["de"]).get(
+            template = core_messages.get(language, core_messages["en"]).get(
                 key,
-                core_messages["de"].get(key, key),
+                core_messages["en"].get(key, key),
             )
         return template.format(**kwargs)
 
@@ -1357,6 +1545,8 @@ class IRCBot:
                 self.request_channel_modes(joined_channel)
             self.request_channel_members(joined_channel)
             self.request_channel_who(joined_channel)
+            if self.configured_peer_nicks:
+                self._pending_part_checks[self.normalize_channel_name(joined_channel)] = time.monotonic()
             return
         if joined_channel:
             self.apply_configured_channel_modes(joined_channel, joined_nick, joined_ident, joined_host)
@@ -1383,6 +1573,8 @@ class IRCBot:
         if not self.userhost_in_names_enabled:
             self.request_channel_modes(invited_channel)
         self.request_channel_members(invited_channel)
+        if self.configured_peer_nicks:
+            self._pending_part_checks[self.normalize_channel_name(invited_channel)] = time.monotonic()
         if inviter_nick:
             self.send_action(
                 invited_channel,
@@ -1392,6 +1584,20 @@ class IRCBot:
     def _handle_names_reply(self, names_channel: str, names_param: str) -> None:
         names_members = names_param.lstrip(":").split()
         self.add_channel_members(names_channel, names_members)
+        normalized = self.normalize_channel_name(names_channel)
+        pending = self._pending_part_checks.get(normalized)
+        if pending is not None and self.configured_peer_nicks:
+            if time.monotonic() - pending > 10.0:
+                del self._pending_part_checks[normalized]
+            else:
+                for member in names_members:
+                    cleaned = self.normalize_channel_member_nick(member)
+                    if cleaned and cleaned.lower() in self.configured_peer_nicks:
+                        self.send_privmsg(names_channel, self.tr("bot_part_other_bot_present", channel=names_channel, nick=cleaned))
+                        self.send_raw(f"PART {names_channel}")
+                        self.forget_channel(names_channel)
+                        del self._pending_part_checks[normalized]
+                        break
         if not self.userhost_in_names_enabled:
             return
         for member in names_members:
@@ -1436,25 +1642,19 @@ class IRCBot:
         self.send_notice(source_nick, f"\x01VERSION {version_line()}\x01")
         return True
 
-    def build_url_usage_text(self, prefix: str) -> str:
-        max_id = self._get_url_service().get_max_url_id(self)
-        if max_id is None:
-            return self.tr("usage_url", prefix=prefix, command=self.primary_command_name("url"))
-        return self.tr("usage_url_with_max", prefix=prefix, command=self.primary_command_name("url"), max_id=max_id)
-
     def format_target_nick(self, target_nick: str) -> str:
         if target_nick.lower() == self.current_nick.lower():
             return self.tr("self_target")
         return target_nick
 
     def get_weather_text(self, location_query: str, command_prefix: str, reply_target: str) -> str:
-        location = location_query.strip() or self.config.weather_default_location.strip()
+        location = location_query.strip() or getattr(self, "_weather_default_location", "").strip()
         if not location:
             return self.tr("usage_weather", prefix=command_prefix, command=self.primary_command_name("weather"))
         return self.render_openweather_weather_text(location, reply_target)
 
     def render_openweather_weather_text(self, location: str, reply_target: str) -> str:
-        if not self.config.weather_appid.strip():
+        if not getattr(self, "_weather_appid", "").strip():
             return self.tr("weather_appid_missing")
 
         weather_url = self.build_openweather_url(location)
@@ -1528,7 +1728,7 @@ class IRCBot:
         url = (
             "https://api.openweathermap.org/data/2.5/weather?"
             f"q={quote_plus(query_location)}"
-            f"&appid={quote_plus(self.config.weather_appid)}"
+            f"&appid={quote_plus(getattr(self, '_weather_appid', ''))}"
             "&units=metric"
             f"&lang={quote_plus(self.config.language)}"
         )
@@ -1894,158 +2094,6 @@ class IRCBot:
         text = f"{compact:.1f}".rstrip("0").rstrip(".")
         return f"{text}{suffix}"
 
-    def get_dart_stats_text(self, target_nick: str, requested_by: str) -> str:
-        points, hit_text = self.roll_dart_turn()
-        self.record_dart_throw(requested_by, points)
-        rendered_target = self.format_target_nick(target_nick)
-        if points == 31337:
-            return self.tr(
-                "dart_destroy",
-                bot=self.current_nick,
-                target=rendered_target,
-                points=self.format_points(points),
-                hit=hit_text,
-                requested_by=requested_by,
-            )
-
-        return self.tr(
-            "dart_hit",
-            bot=self.current_nick,
-            target=rendered_target,
-            hit=hit_text,
-            points=self.format_points(points),
-            requested_by=requested_by,
-        )
-
-    def record_dart_throw(self, nick: str, points: int) -> None:
-        if pymysql is None:
-            return
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO bot_dart (nick, points, `throws`)
-                    VALUES (%s, %s, 1)
-                    ON DUPLICATE KEY UPDATE
-                        points = points + VALUES(points),
-                        `throws` = `throws` + 1
-                    """,
-                    (nick, points),
-                )
-        except Exception:
-            pass
-        finally:
-            conn.close()
-    def get_my_dart_stats_text(self, nick: str) -> str:
-        if pymysql is None:
-            return self.tr("dart_stats_missing_pkg")
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return self.tr("dart_stats_unavailable")
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT points, `throws` FROM bot_dart WHERE nick = %s LIMIT 1", (nick,))
-                row = cur.fetchone()
-                if not row:
-                    return self.tr("dart_stats_empty")
-
-                points = int(row.get("points", 0))
-                throws = int(row.get("throws", 0))
-
-                cur.execute("SELECT COUNT(*) AS total_players FROM bot_dart")
-                total_row = cur.fetchone() or {}
-                total_players = int(total_row.get("total_players", 0))
-
-                cur.execute(
-                    """
-                    SELECT COUNT(*) + 1 AS rank_pos
-                    FROM bot_dart
-                    WHERE points > %s OR (points = %s AND `throws` > %s)
-                    """,
-                    (points, points, throws),
-                )
-                rank_row = cur.fetchone() or {}
-                rank = int(rank_row.get("rank_pos", 1))
-        except Exception:
-            return self.tr("dart_stats_unavailable")
-        finally:
-            conn.close()
-
-        average = points / throws if throws else 0.0
-        return self.tr(
-            "dart_stats",
-            points=self.format_points(points),
-            throws=self.format_points(throws),
-            average=self.format_average(average),
-            rank=rank,
-            total=total_players,
-        )
-
-    def get_dart_top10_text(self) -> str:
-        if pymysql is None:
-            return self.tr("dart_db_missing_pkg")
-
-        def open_connection(password_value: str | bytes):
-            return pymysql.connect(
-                host=self.config.mysql_host,
-                port=self.config.mysql_port,
-                user=self.config.mysql_user,
-                password=password_value,
-                database=self.config.mysql_database,
-                charset="utf8mb4",
-                autocommit=True,
-                connect_timeout=5,
-                cursorclass=pymysql.cursors.DictCursor,
-            )
-
-        try:
-            conn = open_connection(self.config.mysql_password)
-        except UnicodeEncodeError:
-            try:
-                conn = open_connection(self.config.mysql_password.encode("utf-8"))
-            except Exception as exc:
-                return self.tr("dart_db_unreachable", error=exc)
-        except Exception as exc:
-            return self.tr("dart_db_unreachable", error=exc)
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT nick, points, `throws` FROM bot_dart ORDER BY points DESC, `throws` DESC, nick ASC LIMIT 10"
-                )
-                rows = cur.fetchall()
-        except Exception as exc:
-            return self.tr("dart_top_failed", error=exc)
-        finally:
-            conn.close()
-
-        if not rows:
-            return self.tr("dart_no_data")
-
-        leaderboard = []
-        for index, row in enumerate(rows, start=1):
-            nick = str(row.get("nick", "?"))
-            points = int(row.get("points", 0))
-            throw_count = int(row.get("throws", 0))
-            leaderboard.append(
-                self.tr(
-                    "dart_top_entry",
-                    index=index,
-                    nick=nick,
-                    points=self.format_points(points),
-                    throws=self.format_points(throw_count),
-                )
-            )
-
-        return self.tr("dart_top", items=" | ".join(leaderboard))
-
     def sniff_urls_in_message(self, message: str, channel: str, source_nick: str) -> None:
         self._get_url_service().sniff_urls_in_message(self, message, channel, source_nick)
 
@@ -2075,57 +2123,10 @@ class IRCBot:
             return None
 
     def open_db_connection(self):
-        if pymysql is None:
-            return None
-
-        def connect_with_password(password_value: str | bytes):
-            return pymysql.connect(
-                host=self.config.mysql_host,
-                port=self.config.mysql_port,
-                user=self.config.mysql_user,
-                password=password_value,
-                database=self.config.mysql_database,
-                charset="utf8mb4",
-                autocommit=True,
-                connect_timeout=5,
-                cursorclass=pymysql.cursors.DictCursor,
-            )
-
-        try:
-            return connect_with_password(self.config.mysql_password)
-        except UnicodeEncodeError:
-            try:
-                return connect_with_password(self.config.mysql_password.encode("utf-8"))
-            except Exception:
-                return None
-        except Exception:
-            return None
+        return self.db.open_db()
 
     def open_server_connection(self):
-        if pymysql is None:
-            return None
-
-        def connect_with_password(password_value: str | bytes):
-            return pymysql.connect(
-                host=self.config.mysql_host,
-                port=self.config.mysql_port,
-                user=self.config.mysql_user,
-                password=password_value,
-                charset="utf8mb4",
-                autocommit=True,
-                connect_timeout=5,
-                cursorclass=pymysql.cursors.DictCursor,
-            )
-
-        try:
-            return connect_with_password(self.config.mysql_password)
-        except UnicodeEncodeError:
-            try:
-                return connect_with_password(self.config.mysql_password.encode("utf-8"))
-            except Exception:
-                return None
-        except Exception:
-            return None
+        return self.db.open_server()
 
     def ensure_database_setup(self) -> None:
         if self.db_initialized or pymysql is None:
@@ -2138,8 +2139,6 @@ class IRCBot:
 
         try:
             with server_conn.cursor() as cur:
-                # Database name is not directly parameterizable in MySQL.
-                # Only accept alphanumeric and underscore to prevent injection.
                 db_name = self.config.mysql_database
                 if not db_name or not all(c.isalnum() or c == '_' for c in db_name):
                     raise ValueError(f"Invalid database name: {db_name}")
@@ -2158,133 +2157,23 @@ class IRCBot:
             return
 
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_dart (
-                        nick VARCHAR(64) NOT NULL,
-                        points INT NOT NULL DEFAULT 0,
-                        `throws` INT NOT NULL DEFAULT 0,
-                        PRIMARY KEY (nick)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_url (
-                        id INT NOT NULL,
-                        url VARCHAR(2048) NOT NULL,
-                        posted_by VARCHAR(64) NOT NULL DEFAULT '',
-                        time VARCHAR(32) NOT NULL DEFAULT '',
-                        is_blocked TINYINT(1) NOT NULL DEFAULT 0,
-                        is_deadlink TINYINT(1) NOT NULL DEFAULT 0,
-                        topic VARCHAR(180) NULL,
-                        title_missing TINYINT(1) NOT NULL DEFAULT 0,
-                        PRIMARY KEY (id),
-                        KEY idx_bot_url_flags (is_blocked, is_deadlink)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                self.ensure_bot_url_schema(cur)
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_channels (
-                        network VARCHAR(255) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        joined_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (network, channel)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    RSS_ANNOUNCE_CHANNELS_TABLE_SQL
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_admin_roles (
-                        network VARCHAR(255) NOT NULL,
-                        role_name VARCHAR(64) NOT NULL,
-                        is_admin TINYINT(1) NOT NULL DEFAULT 0,
-                        can_raw TINYINT(1) NOT NULL DEFAULT 0,
-                        created_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (network, role_name)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_admin_users (
-                        network VARCHAR(255) NOT NULL,
-                        user_mask VARCHAR(255) NOT NULL,
-                        display_name VARCHAR(64) NOT NULL DEFAULT '',
-                        password_salt VARCHAR(64) NOT NULL,
-                        password_hash VARCHAR(128) NOT NULL,
-                        role_name VARCHAR(64) NOT NULL,
-                        created_at VARCHAR(32) NOT NULL,
-                        created_by VARCHAR(64) NOT NULL DEFAULT '',
-                        PRIMARY KEY (network, user_mask),
-                        KEY idx_bot_admin_users_role (network, role_name)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_admin_role_modes (
-                        network VARCHAR(255) NOT NULL,
-                        role_name VARCHAR(64) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        mode CHAR(1) NOT NULL,
-                        created_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (network, role_name, channel, mode)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS bot_admin_user_modes (
-                        network VARCHAR(255) NOT NULL,
-                        user_mask VARCHAR(255) NOT NULL,
-                        channel VARCHAR(128) NOT NULL,
-                        mode CHAR(1) NOT NULL,
-                        created_at VARCHAR(32) NOT NULL,
-                        PRIMARY KEY (network, user_mask, channel, mode)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                self.db_initialized = True
+            ensure_tables(self, conn, self.config.network_key, self.current_time_string())
+            for hook in self.plugin_manager.get_hooks("ensure_schema"):
+                hook(conn.cursor(), self.config.mysql_database)
+            for hook in self.plugin_manager.get_hooks("seed_database"):
+                hook(self, self.current_time_string())
+            self.db_initialized = True
         except Exception as exc:
             print(self.tr("db_table_setup_failed", error=exc))
         finally:
             conn.close()
 
-    def ensure_bot_url_schema(self, cur) -> None:
-        cur.execute(
-            """
-            SELECT COLUMN_NAME
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'bot_url'
-            """,
-            (self.config.mysql_database,),
-        )
-        existing_columns = {str(row.get("COLUMN_NAME", "")) for row in (cur.fetchall() or [])}
-
-        if "topic" not in existing_columns:
-            cur.execute("ALTER TABLE bot_url ADD COLUMN topic VARCHAR(180) NULL")
-        if "title_missing" not in existing_columns:
-            cur.execute("ALTER TABLE bot_url ADD COLUMN title_missing TINYINT(1) NOT NULL DEFAULT 0")
-
     def load_saved_channels(self) -> list[str]:
         conn = self.open_db_connection()
         if conn is None:
             return []
-
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT channel FROM bot_channels WHERE network = %s ORDER BY channel ASC", (self.config.network_key,))
-                rows = cur.fetchall() or []
-            return [str(row.get("channel", "")).strip() for row in rows if str(row.get("channel", "")).strip()]
-        except Exception:
-            return []
+            return ChannelRepository(conn, self.config.network_key).load_saved()
         finally:
             conn.close()
 
@@ -2292,15 +2181,8 @@ class IRCBot:
         conn = self.open_db_connection()
         if conn is None:
             return
-
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT IGNORE INTO bot_channels (network, channel, joined_at) VALUES (%s, %s, %s)",
-                    (self.config.network_key, channel, self.current_time_string()),
-                )
-        except Exception:
-            pass
+            ChannelRepository(conn, self.config.network_key).store_if_missing(channel, self.current_time_string())
         finally:
             conn.close()
 
@@ -2308,12 +2190,8 @@ class IRCBot:
         conn = self.open_db_connection()
         if conn is None:
             return
-
         try:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM bot_channels WHERE network = %s AND channel = %s", (self.config.network_key, channel))
-        except Exception:
-            pass
+            ChannelRepository(conn, self.config.network_key).delete(channel)
         finally:
             conn.close()
 
@@ -2352,77 +2230,14 @@ class IRCBot:
                 (self.config.network_key, channel, now),
             )
 
-    def get_rss_announce_channels(self) -> tuple[str, ...]:
-        configured = str(self.config.rss_announce_channel or "").strip()
-        fallback_channels = self.parse_rss_announce_channels(configured)
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return tuple(fallback_channels)
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(RSS_ANNOUNCE_CHANNELS_TABLE_SQL)
-                db_channels = self.load_rss_announce_channels_from_cursor(cur)
-                if db_channels:
-                    return tuple(db_channels)
-                self.seed_rss_announce_channels(cur, fallback_channels)
-        except Exception:
-            return tuple(fallback_channels)
-        finally:
-            conn.close()
-
-        return tuple(fallback_channels)
-
-    def get_rss_announce_channel(self) -> str:
-        channels = self.get_rss_announce_channels()
-        return channels[0] if channels else ""
-
-    def set_rss_announce_channels(self, channels: list[str]) -> tuple[bool, str]:
-        normalized_channels: list[str] = []
-        for channel in channels:
-            normalized = self.normalize_channel_name(channel)
-            if not normalized:
-                continue
-            if not normalized.startswith("#"):
-                return False, INVALID_CHANNEL_MESSAGE
-            if normalized not in normalized_channels:
-                normalized_channels.append(normalized)
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return False, self.tr("db_connect_failed")
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(RSS_ANNOUNCE_CHANNELS_TABLE_SQL)
-                cur.execute(
-                    "DELETE FROM bot_rss_announce_channels WHERE network = %s",
-                    (self.config.network_key,),
-                )
-                if normalized_channels:
-                    now = self.current_time_string()
-                    for channel in normalized_channels:
-                        cur.execute(
-                            """
-                            INSERT INTO bot_rss_announce_channels (network, channel, updated_at)
-                            VALUES (%s, %s, %s)
-                            """,
-                            (self.config.network_key, channel, now),
-                        )
-            return True, ""
-        except Exception as exc:
-            return False, str(exc)
-        finally:
-            conn.close()
-
     def set_rss_announce_channel(self, channel: str) -> tuple[bool, str]:
         normalized_channel = self.normalize_channel_name(channel)
+        hook = self.plugin_manager.get_hook("set_rss_announce_channels")
         if not normalized_channel:
-            return self.set_rss_announce_channels([])
+            return hook(self, []) if hook is not None else (False, "")
         if not normalized_channel.startswith("#"):
-            return False, INVALID_CHANNEL_MESSAGE
-        return self.set_rss_announce_channels([normalized_channel])
+            return False, self.tr("invalid_channel")
+        return hook(self, [normalized_channel]) if hook is not None else (False, "")
 
     @staticmethod
     def hash_admin_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
@@ -2440,21 +2255,8 @@ class IRCBot:
         return hmac.compare_digest(derived, expected_hash)
 
     def has_admin_users(self) -> bool:
-        conn = self.open_db_connection()
-        if conn is None:
-            return False
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM bot_admin_users WHERE network = %s LIMIT 1",
-                    (self.config.network_key,),
-                )
-                return cur.fetchone() is not None
-        except Exception:
-            return False
-        finally:
-            conn.close()
+        hook = self.plugin_manager.get_hook("has_admin_users")
+        return bool(hook(self)) if hook is not None else False
 
     def ensure_admin_bootstrap(self, interactive: bool) -> None:
         if not self.db_initialized or self.has_admin_users():
@@ -2470,107 +2272,46 @@ class IRCBot:
 
         admin_mask = ""
         while not admin_mask:
-            entered_mask = input("Admin ident@host: ").strip()
+            entered_mask = input(self.tr("admin_prompt_mask")).strip()
             normalized_mask = self.normalize_user_mask(entered_mask)
             if normalized_mask is None:
-                print("Ungültige Hostmask. Erwartet wird ident@host.")
+                print(self.tr("invalid_hostmask"))
                 continue
             admin_mask = normalized_mask
 
         password = ""
         while not password:
-            first = getpass.getpass("Admin Passwort: ")
-            second = getpass.getpass("Passwort wiederholen: ")
+            first = getpass.getpass(self.tr("admin_prompt_password"))
+            second = getpass.getpass(self.tr("admin_prompt_password_confirm"))
             if not first:
-                print("Passwort darf nicht leer sein.")
+                print(self.tr("admin_password_empty"))
                 continue
             if first != second:
-                print("Passwörter stimmen nicht überein.")
+                print(self.tr("admin_password_mismatch"))
                 continue
             password = first
 
-        self.ensure_default_admin_role()
+        hook = self.plugin_manager.get_hook("ensure_default_admin_role")
+        if hook is not None:
+            hook(self)
 
-        created_user, user_message = self.create_admin_user(
+        hook = self.plugin_manager.get_hook("hash_admin_password")
+        salt_hex, hash_hex = hook(password) if hook is not None else (None, None)
+        hook = self.plugin_manager.get_hook("create_admin_user")
+        created_user, user_message = hook(
+            self,
             display_name="bootstrap",
             user_mask=admin_mask,
             password=password,
             role_name="admin",
             created_by="bootstrap",
-        )
+        ) if hook is not None else (False, "")
         if not created_user:
             print(user_message)
             print(self.tr("admin_bootstrap_skipped"))
             return
 
         print(self.tr("admin_bootstrap_created", mask=admin_mask, network=self.config.network_key))
-
-    def ensure_default_admin_role(self) -> None:
-        conn = self.open_db_connection()
-        if conn is None:
-            return
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(ROLE_EXISTS_QUERY, (self.config.network_key, "admin"))
-                if cur.fetchone() is not None:
-                    cur.execute(
-                        "UPDATE bot_admin_roles SET is_admin = 1, can_raw = 1 WHERE network = %s AND role_name = %s",
-                        (self.config.network_key, "admin"),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
-                        VALUES (%s, %s, 1, 1, %s)
-                        """,
-                        (self.config.network_key, "admin", self.current_time_string()),
-                    )
-
-                cur.execute(ROLE_EXISTS_QUERY, (self.config.network_key, "user"))
-                if cur.fetchone() is None:
-                    cur.execute(
-                        """
-                        INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
-                        VALUES (%s, %s, 0, 0, %s)
-                        """,
-                        (self.config.network_key, "user", self.current_time_string()),
-                    )
-        except Exception:
-            pass
-        finally:
-            conn.close()
-
-    def load_admin_user(self, user_mask: str) -> dict[str, object] | None:
-        normalized_mask = self.normalize_user_mask(user_mask)
-        if normalized_mask is None:
-            return None
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return None
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT u.user_mask, u.display_name, u.password_salt, u.password_hash, u.role_name,
-                           COALESCE(r.is_admin, 0) AS is_admin,
-                           COALESCE(r.can_raw, 0) AS can_raw
-                    FROM bot_admin_users u
-                    LEFT JOIN bot_admin_roles r
-                      ON r.network = u.network AND r.role_name = u.role_name
-                    WHERE u.network = %s AND u.user_mask = %s
-                    LIMIT 1
-                    """,
-                    (self.config.network_key, normalized_mask),
-                )
-                row = cur.fetchone()
-                return row if row else None
-        except Exception:
-            return None
-        finally:
-            conn.close()
 
     def get_authenticated_admin(self, user_mask: str, require_admin: bool = False, require_raw: bool = False) -> dict[str, object] | None:
         normalized_mask = self.normalize_user_mask(user_mask)
@@ -2586,7 +2327,8 @@ class IRCBot:
             self.end_admin_session(normalized_mask, revoke_modes=True)
             return None
 
-        row = self.load_admin_user(normalized_mask)
+        hook = self.plugin_manager.get_hook("load_admin_user")
+        row = hook(self, normalized_mask) if hook is not None else None
         if row is None:
             self.end_admin_session(normalized_mask, revoke_modes=True)
             return None
@@ -2600,26 +2342,27 @@ class IRCBot:
         return row
 
     def login_admin_user(self, user_mask: str, password: str, nick: str = "") -> tuple[bool, str]:
-        row = self.load_admin_user(user_mask)
+        hook = self.plugin_manager.get_hook("load_admin_user")
+        row = hook(self, user_mask) if hook is not None else None
         if row is None:
             return False, "Unbekannte Hostmask."
 
         salt = str(row.get("password_salt", ""))
         expected_hash = str(row.get("password_hash", ""))
         if not salt or not expected_hash or not self.verify_admin_password(password, salt, expected_hash):
-            return False, "Passwort falsch."
+            return False, self.tr("admin_password_wrong")
 
         normalized_mask = self.normalize_user_mask(user_mask)
         if normalized_mask is None:
-            return False, INVALID_HOSTMASK_MESSAGE
+            return False, self.tr("invalid_hostmask")
 
         self._admin_sessions[normalized_mask] = {
             "expires_at": time.time() + ADMIN_SESSION_TTL_SECONDS,
             "nick": nick.strip(),
         }
         applied_count = self.apply_login_modes_for_user(normalized_mask, nick.strip())
-        suffix = f" Höchste Channel-Rechte gesetzt: {applied_count}." if applied_count > 0 else ""
-        return True, f"Login erfolgreich für {normalized_mask}.{suffix}"
+        suffix = self.tr("admin_channel_modes_applied", applied_count=applied_count) if applied_count > 0 else ""
+        return True, f"{self.tr('admin_login_success', mask=normalized_mask)}{suffix}"
 
     def logout_admin_user(self, user_mask: str) -> bool:
         normalized_mask = self.normalize_user_mask(user_mask)
@@ -2651,292 +2394,74 @@ class IRCBot:
             if nick.lower() == old:
                 session["nick"] = new_nick
 
-    def create_admin_role(self, role_name: str, is_admin: bool = False, can_raw: bool = False) -> tuple[bool, str]:
-        normalized_role = self.normalize_role_name(role_name)
-        if normalized_role is None:
-            return False, "Ungültiger Rollenname. Erlaubt sind a-z, 0-9, _ und - ."
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return False, self.tr("db_connect_failed")
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    ROLE_EXISTS_QUERY,
-                    (self.config.network_key, normalized_role),
-                )
-                if cur.fetchone() is not None:
-                    return False, f"Rolle {normalized_role} existiert bereits."
-
-                cur.execute(
-                    """
-                    INSERT INTO bot_admin_roles (network, role_name, is_admin, can_raw, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (self.config.network_key, normalized_role, 1 if is_admin else 0, 1 if can_raw else 0, self.current_time_string()),
-                )
-            return True, f"Rolle {normalized_role} angelegt."
-        except Exception as exc:
-            return False, f"Rolle konnte nicht angelegt werden: {exc}"
-        finally:
-            conn.close()
-
-    def set_role_flag(self, role_name: str, flag_name: str, enabled: bool) -> tuple[bool, str]:
-        normalized_role = self.normalize_role_name(role_name)
-        column = ROLE_FLAG_COLUMNS.get(flag_name.strip().lower())
-        if normalized_role is None or column is None:
-            return False, "Ungültige Rolle oder Flag. Erlaubte Flags: admin, raw."
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return False, self.tr("db_connect_failed")
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"UPDATE bot_admin_roles SET {column} = %s WHERE network = %s AND role_name = %s",
-                    (1 if enabled else 0, self.config.network_key, normalized_role),
-                )
-                if cur.rowcount == 0:
-                    return False, f"Rolle {normalized_role} existiert nicht."
-            return True, f"Flag {flag_name.lower()} fuer Rolle {normalized_role} ist jetzt {'an' if enabled else 'aus'}."
-        except Exception as exc:
-            return False, f"Rollenflag konnte nicht gesetzt werden: {exc}"
-        finally:
-            conn.close()
-
-    def list_admin_roles(self) -> list[dict[str, object]]:
-        conn = self.open_db_connection()
-        if conn is None:
-            return []
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT role_name, is_admin, can_raw
-                    FROM bot_admin_roles
-                    WHERE network = %s
-                    ORDER BY role_name ASC
-                    """,
-                    (self.config.network_key,),
-                )
-                return list(cur.fetchall() or [])
-        except Exception:
-            return []
-        finally:
-            conn.close()
-
-    def create_admin_user(self, display_name: str, user_mask: str, password: str, role_name: str, created_by: str) -> tuple[bool, str]:
+    def apply_login_modes_for_user(self, user_mask: str, nick: str) -> int:
         normalized_mask = self.normalize_user_mask(user_mask)
-        normalized_role = self.normalize_role_name(role_name)
-        label = display_name.strip()[:64]
+        target_nick = nick.strip()
+        if normalized_mask is None or not target_nick:
+            return 0
 
-        if normalized_mask is None:
-            return False, "Ungültige Hostmask. Erwartet wird ident@host."
-        if normalized_role is None:
-            return False, "Ungültiger Rollenname."
-        if not password:
-            return False, "Passwort darf nicht leer sein."
+        applied = 0
+        hook = self.plugin_manager.get_hook("get_user_assigned_channels")
+        for channel in (hook(self, normalized_mask) if hook is not None else ()):
+            modes = self.get_user_channel_modes(normalized_mask, channel)
+            if not modes:
+                continue
+            self.apply_member_mode(channel, target_nick, modes[0])
+            applied += 1
+        return applied
 
-        conn = self.open_db_connection()
-        if conn is None:
-            return False, self.tr("db_connect_failed")
+    def revoke_login_modes_for_user(self, user_mask: str, nick: str) -> int:
+        normalized_mask = self.normalize_user_mask(user_mask)
+        target_nick = nick.strip()
+        if normalized_mask is None or not target_nick:
+            return 0
 
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM bot_admin_roles WHERE network = %s AND role_name = %s LIMIT 1",
-                    (self.config.network_key, normalized_role),
-                )
-                if cur.fetchone() is None:
-                    return False, f"Rolle {normalized_role} existiert nicht."
+        revoked = 0
+        hook_channels = self.plugin_manager.get_hook("get_user_assigned_channels")
+        hook_modes = self.plugin_manager.get_hook("get_configured_user_channel_modes")
+        for channel in (hook_channels(self, normalized_mask) if hook_channels is not None else ()):
+            modes = hook_modes(self, normalized_mask, channel) if hook_modes is not None else ()
+            if not modes:
+                continue
+            self.remove_member_mode(channel, target_nick, modes[0])
+            revoked += 1
+        return revoked
 
-                cur.execute(
-                    "SELECT 1 FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
-                    (self.config.network_key, normalized_mask),
-                )
-                if cur.fetchone() is not None:
-                    return False, f"Benutzer {normalized_mask} existiert bereits."
+    def apply_configured_channel_modes(self, channel: str, nick: str, ident: str, host: str) -> tuple[str, ...]:
+        user_mask = self.user_mask_from_parts(ident, host)
+        if user_mask is None:
+            return ()
 
-                salt_hex, hash_hex = self.hash_admin_password(password)
-                cur.execute(
-                    """
-                    INSERT INTO bot_admin_users
-                        (network, user_mask, display_name, password_salt, password_hash, role_name, created_at, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        self.config.network_key,
-                        normalized_mask,
-                        label,
-                        salt_hex,
-                        hash_hex,
-                        normalized_role,
-                        self.current_time_string(),
-                        created_by[:64],
-                    ),
-                )
-            return True, f"Benutzer {normalized_mask} mit Rolle {normalized_role} angelegt."
-        except Exception as exc:
-            return False, f"Benutzer konnte nicht angelegt werden: {exc}"
-        finally:
-            conn.close()
+        modes = self.get_user_channel_modes(user_mask, channel)
+        for mode in modes:
+            self.apply_member_mode(channel, nick, mode)
+        return modes
 
-    def delete_admin_user(self, user_mask: str) -> tuple[bool, str]:
+    def is_admin_session_active(self, user_mask: str) -> bool:
         normalized_mask = self.normalize_user_mask(user_mask)
         if normalized_mask is None:
-            return False, INVALID_HOSTMASK_MESSAGE
+            return False
 
-        conn = self.open_db_connection()
-        if conn is None:
-            return False, self.tr("db_connect_failed")
+        session = self._admin_sessions.get(normalized_mask)
+        if session is None:
+            return False
 
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s",
-                    (self.config.network_key, normalized_mask),
-                )
-                cur.execute(
-                    "DELETE FROM bot_admin_users WHERE network = %s AND user_mask = %s",
-                    (self.config.network_key, normalized_mask),
-                )
-                if cur.rowcount == 0:
-                    return False, f"Benutzer {normalized_mask} existiert nicht."
-            self._admin_sessions.pop(normalized_mask, None)
-            return True, f"Benutzer {normalized_mask} geloescht."
-        except Exception as exc:
-            return False, f"Benutzer konnte nicht geloescht werden: {exc}"
-        finally:
-            conn.close()
+        expires_at = float(session.get("expires_at", 0.0))
+        if expires_at < time.time():
+            self.end_admin_session(normalized_mask, revoke_modes=True)
+            return False
+        return True
 
-    def set_admin_user_role(self, user_mask: str, role_name: str) -> tuple[bool, str]:
-        normalized_mask = self.normalize_user_mask(user_mask)
-        normalized_role = self.normalize_role_name(role_name)
-        if normalized_mask is None or normalized_role is None:
-            return False, "Ungültige Hostmask oder Rolle."
+    def get_user_channel_modes(self, user_mask: str, channel: str) -> tuple[str, ...]:
+        configured_modes = self.get_configured_user_channel_modes(user_mask, channel)
+        if not configured_modes:
+            return ()
 
-        conn = self.open_db_connection()
-        if conn is None:
-            return False, self.tr("db_connect_failed")
+        admin_row = self.load_admin_user(user_mask)
+        if admin_row is not None and bool(int(admin_row.get("is_admin", 0))) and not self.is_admin_session_active(user_mask):
+            return ()
 
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    ROLE_EXISTS_QUERY,
-                    (self.config.network_key, normalized_role),
-                )
-                if cur.fetchone() is None:
-                    return False, f"Rolle {normalized_role} existiert nicht."
-
-                cur.execute(
-                    "UPDATE bot_admin_users SET role_name = %s WHERE network = %s AND user_mask = %s",
-                    (normalized_role, self.config.network_key, normalized_mask),
-                )
-                if cur.rowcount == 0:
-                    return False, f"Benutzer {normalized_mask} existiert nicht."
-            return True, f"Benutzer {normalized_mask} hat jetzt Rolle {normalized_role}."
-        except Exception as exc:
-            return False, f"Rolle konnte nicht gesetzt werden: {exc}"
-        finally:
-            conn.close()
-
-    def list_admin_users(self) -> list[dict[str, object]]:
-        conn = self.open_db_connection()
-        if conn is None:
-            return []
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_mask, display_name, role_name
-                    FROM bot_admin_users
-                    WHERE network = %s
-                    ORDER BY user_mask ASC
-                    """,
-                    (self.config.network_key,),
-                )
-                return list(cur.fetchall() or [])
-        except Exception:
-            return []
-        finally:
-            conn.close()
-
-    def set_role_channel_mode(self, role_name: str, channel: str, mode_or_prefix: str, enabled: bool) -> tuple[bool, str]:
-        normalized_role = self.normalize_role_name(role_name)
-        normalized_channel = self.normalize_channel_name(channel)
-        mode = self.normalize_member_mode(mode_or_prefix)
-        if normalized_role is None or not normalized_channel.startswith("#") or mode is None:
-            return False, "Ungültige Rolle, Channel oder Modus."
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return False, self.tr("db_connect_failed")
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    ROLE_EXISTS_QUERY,
-                    (self.config.network_key, normalized_role),
-                )
-                if cur.fetchone() is None:
-                    return False, f"Rolle {normalized_role} existiert nicht."
-
-                if enabled:
-                    cur.execute(
-                        """
-                        INSERT IGNORE INTO bot_admin_role_modes (network, role_name, channel, mode, created_at)
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        (self.config.network_key, normalized_role, normalized_channel, mode, self.current_time_string()),
-                    )
-                else:
-                    cur.execute(
-                        "DELETE FROM bot_admin_role_modes WHERE network = %s AND role_name = %s AND channel = %s AND mode = %s",
-                        (self.config.network_key, normalized_role, normalized_channel, mode),
-                    )
-            action = "gesetzt" if enabled else "entfernt"
-            return True, f"Rollenrecht {normalized_role} {normalized_channel} +{mode} {action}."
-        except Exception as exc:
-            return False, f"Rollenrecht konnte nicht gespeichert werden: {exc}"
-        finally:
-            conn.close()
-
-    def set_user_channel_mode(self, user_mask: str, channel: str, mode_or_prefix: str, enabled: bool) -> tuple[bool, str]:
-        normalized_mask = self.normalize_user_mask(user_mask)
-        normalized_channel = self.normalize_channel_name(channel)
-        mode = self.normalize_member_mode(mode_or_prefix)
-        if normalized_mask is None or not normalized_channel.startswith("#") or mode is None:
-            return False, "Ungültige Hostmask, Channel oder Modus."
-
-        conn = self.open_db_connection()
-        if conn is None:
-            return False, self.tr("db_connect_failed")
-
-        try:
-            with conn.cursor() as cur:
-                if enabled:
-                    cur.execute(
-                        """
-                        INSERT IGNORE INTO bot_admin_user_modes (network, user_mask, channel, mode, created_at)
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        (self.config.network_key, normalized_mask, normalized_channel, mode, self.current_time_string()),
-                    )
-                else:
-                    cur.execute(
-                        "DELETE FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s AND channel = %s AND mode = %s",
-                        (self.config.network_key, normalized_mask, normalized_channel, mode),
-                    )
-            action = "gesetzt" if enabled else "entfernt"
-            return True, f"Benutzerrecht {normalized_mask} {normalized_channel} +{mode} {action}."
-        except Exception as exc:
-            return False, f"Benutzerrecht konnte nicht gespeichert werden: {exc}"
-        finally:
-            conn.close()
+        return configured_modes[:1]
 
     def get_configured_user_channel_modes(self, user_mask: str, channel: str) -> tuple[str, ...]:
         normalized_mask = self.normalize_user_mask(user_mask)
@@ -2986,135 +2511,55 @@ class IRCBot:
         ordered = [mode for mode in self.server_prefix_modes if mode in modes]
         return tuple(ordered)
 
-    def is_admin_session_active(self, user_mask: str) -> bool:
+    def load_admin_user(self, user_mask: str) -> dict[str, object] | None:
         normalized_mask = self.normalize_user_mask(user_mask)
         if normalized_mask is None:
-            return False
-
-        session = self._admin_sessions.get(normalized_mask)
-        if session is None:
-            return False
-
-        expires_at = float(session.get("expires_at", 0.0))
-        if expires_at < time.time():
-            self.end_admin_session(normalized_mask, revoke_modes=True)
-            return False
-        return True
-
-    def get_user_channel_modes(self, user_mask: str, channel: str) -> tuple[str, ...]:
-        configured_modes = self.get_configured_user_channel_modes(user_mask, channel)
-        if not configured_modes:
-            return ()
-
-        admin_row = self.load_admin_user(user_mask)
-        if admin_row is not None and bool(int(admin_row.get("is_admin", 0))) and not self.is_admin_session_active(user_mask):
-            return ()
-
-        return configured_modes[:1]
-
-    def get_user_assigned_channels(self, user_mask: str) -> tuple[str, ...]:
-        normalized_mask = self.normalize_user_mask(user_mask)
-        if normalized_mask is None:
-            return ()
+            return None
 
         conn = self.open_db_connection()
         if conn is None:
-            return ()
+            return None
 
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT role_name FROM bot_admin_users WHERE network = %s AND user_mask = %s LIMIT 1",
+                    """
+                    SELECT u.user_mask, u.display_name, u.password_salt, u.password_hash, u.role_name,
+                           COALESCE(r.is_admin, 0) AS is_admin,
+                           COALESCE(r.can_raw, 0) AS can_raw
+                    FROM bot_admin_users u
+                    LEFT JOIN bot_admin_roles r
+                      ON r.network = u.network AND r.role_name = u.role_name
+                    WHERE u.network = %s AND u.user_mask = %s
+                    LIMIT 1
+                    """,
                     (self.config.network_key, normalized_mask),
                 )
-                row = cur.fetchone() or {}
-                role_name = self.normalize_role_name(str(row.get("role_name", "")))
-
-                channels: set[str] = set()
-                if role_name:
-                    cur.execute(
-                        "SELECT channel FROM bot_admin_role_modes WHERE network = %s AND role_name = %s",
-                        (self.config.network_key, role_name),
-                    )
-                    channels.update(
-                        self.normalize_channel_name(str(entry.get("channel", "")))
-                        for entry in (cur.fetchall() or [])
-                        if str(entry.get("channel", "")).strip()
-                    )
-
-                cur.execute(
-                    "SELECT channel FROM bot_admin_user_modes WHERE network = %s AND user_mask = %s",
-                    (self.config.network_key, normalized_mask),
-                )
-                channels.update(
-                    self.normalize_channel_name(str(entry.get("channel", "")))
-                    for entry in (cur.fetchall() or [])
-                    if str(entry.get("channel", "")).strip()
-                )
+                row = cur.fetchone()
+                return row if row else None
         except Exception:
-            return ()
+            return None
         finally:
             conn.close()
-
-        return tuple(sorted(channel for channel in channels if channel.startswith("#")))
-
-    def apply_login_modes_for_user(self, user_mask: str, nick: str) -> int:
-        normalized_mask = self.normalize_user_mask(user_mask)
-        target_nick = nick.strip()
-        if normalized_mask is None or not target_nick:
-            return 0
-
-        applied = 0
-        for channel in self.get_user_assigned_channels(normalized_mask):
-            modes = self.get_user_channel_modes(normalized_mask, channel)
-            if not modes:
-                continue
-            self.apply_member_mode(channel, target_nick, modes[0])
-            applied += 1
-        return applied
-
-    def revoke_login_modes_for_user(self, user_mask: str, nick: str) -> int:
-        normalized_mask = self.normalize_user_mask(user_mask)
-        target_nick = nick.strip()
-        if normalized_mask is None or not target_nick:
-            return 0
-
-        revoked = 0
-        for channel in self.get_user_assigned_channels(normalized_mask):
-            modes = self.get_configured_user_channel_modes(normalized_mask, channel)
-            if not modes:
-                continue
-            self.remove_member_mode(channel, target_nick, modes[0])
-            revoked += 1
-        return revoked
-
-    def apply_configured_channel_modes(self, channel: str, nick: str, ident: str, host: str) -> tuple[str, ...]:
-        user_mask = self.user_mask_from_parts(ident, host)
-        if user_mask is None:
-            return ()
-
-        modes = self.get_user_channel_modes(user_mask, channel)
-        for mode in modes:
-            self.apply_member_mode(channel, nick, mode)
-        return modes
 
     def apply_channel_modes_for_mask(self, channel: str, nick: str, user_mask: str) -> tuple[bool, str]:
         normalized_mask = self.normalize_user_mask(user_mask)
         normalized_channel = self.normalize_channel_name(channel)
         target_nick = self.strip_channel_member_prefixes(nick)
         if normalized_mask is None:
-            return False, INVALID_HOSTMASK_MESSAGE
+            return False, self.tr("invalid_hostmask")
         if not normalized_channel.startswith("#"):
-            return False, "Ungültiger Channel."
+            return False, self.tr("invalid_channel")
         if not target_nick:
-            return False, "Ungültiger Nick."
+            return False, self.tr("invalid_nick")
 
         if not self.is_nick_in_channel(normalized_channel, self.current_nick):
             return False, f"Bot ist nicht in {normalized_channel}."
         if not self.is_nick_in_channel(normalized_channel, target_nick):
             return False, f"Nick {target_nick} ist nicht in {normalized_channel}."
 
-        modes = self.get_configured_user_channel_modes(normalized_mask, normalized_channel)
+        hook = self.plugin_manager.get_hook("get_configured_user_channel_modes")
+        modes = hook(self, normalized_mask, normalized_channel) if hook is not None else ()
         if not modes:
             return False, f"Keine Rechte fuer {normalized_mask} in {normalized_channel} konfiguriert."
 
@@ -3155,22 +2600,6 @@ class IRCBot:
             pass
         finally:
             conn.close()
-
-    @staticmethod
-    def roll_dart_turn() -> tuple[int, str]:
-        if random.randint(1, 777) == 1:
-            return 31337, "Dartscheibenzerstoerung"
-
-        roll_type = random.choice(["single", "double", "triple", "bull", "bull"])
-        if roll_type == "bull":
-            bull_points = random.choice([25, 50])
-            return bull_points, "Bull" if bull_points == 25 else "Bullseye"
-
-        segment = random.randint(1, 20)
-        multiplier = {"single": 1, "double": 2, "triple": 3}[roll_type]
-        points = segment * multiplier
-        hit_label = {"single": "Single", "double": "Double", "triple": "Triple"}[roll_type]
-        return points, f"{hit_label} {segment}"
 
     @staticmethod
     def parse_irc_line(line: str) -> tuple[str, str, list[str]]:
@@ -3251,7 +2680,7 @@ def is_process_running(pid: int) -> bool:
 def stop_from_pid_file(pid_file: Path) -> bool:
     pid = read_pid_file(pid_file)
     if pid is None:
-        print("Kein laufender Bot gefunden (PID-Datei fehlt oder ungueltig).")
+        print("No running bot found (PID file missing or invalid).")
         return False
 
     if not is_process_running(pid):
@@ -3321,8 +2750,8 @@ def ensure_admin_bootstrap_for_configs(configs: list[BotConfig], interactive: bo
             bot.close()
 
 
-def _run_bot_cycle(config: BotConfig, stop_event: threading.Event | None) -> tuple[bool, float, IRCBot]:
-    bot = IRCBot(config)
+def _run_bot_cycle(config: BotConfig, stop_event: threading.Event | None, configured_peer_nicks: set[str] | None = None) -> tuple[bool, float, IRCBot]:
+    bot = IRCBot(config, configured_peer_nicks)
     bot.setup_oidentd_conf()
     bot.ensure_database_setup()
     bot.ensure_admin_bootstrap(sys.stdin.isatty())
@@ -3366,12 +2795,12 @@ def _next_retry_wait(base_retry_wait: int, current_retry_wait: int, max_retry_wa
     return min(max_retry_wait, max(base_retry_wait, current_retry_wait * 2))
 
 
-def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None) -> None:
+def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None, configured_peer_nicks: set[str] | None = None) -> None:
     base_retry_wait = max(30, config.reconnect_delay_seconds)
     retry_wait = base_retry_wait
     max_retry_wait = 300
     while not (stop_event and stop_event.is_set()):
-        should_stop, uptime, bot = _run_bot_cycle(config, stop_event)
+        should_stop, uptime, bot = _run_bot_cycle(config, stop_event, configured_peer_nicks)
         if should_stop:
             break
 
@@ -3385,25 +2814,25 @@ def run_bot_forever(config: BotConfig, stop_event: threading.Event | None = None
         retry_wait = _next_retry_wait(base_retry_wait, retry_wait, max_retry_wait, uptime)
 
 
-def run_multiple_bots_forever(configs: list[BotConfig]) -> None:
+def run_multiple_bots_forever(configs: list[BotConfig], peer_nicks_by_config: dict[str, set[str]]) -> None:
     stop_event = threading.Event()
-    threads = _start_bot_threads(configs, stop_event)
+    threads = _start_bot_threads(configs, stop_event, peer_nicks_by_config)
 
     try:
         _join_threads_until_stopped(threads)
     except KeyboardInterrupt:
-        print("Beende Bots.")
+        print("Stopping bots.")
     finally:
         stop_event.set()
         _join_alive_threads(threads, timeout=2)
 
 
-def _start_bot_threads(configs: list[BotConfig], stop_event: threading.Event) -> list[threading.Thread]:
+def _start_bot_threads(configs: list[BotConfig], stop_event: threading.Event, peer_nicks_by_config: dict[str, set[str]]) -> list[threading.Thread]:
     threads: list[threading.Thread] = []
     for config in configs:
         thread = threading.Thread(
             target=run_bot_forever,
-            args=(config, stop_event),
+            args=(config, stop_event, peer_nicks_by_config.get(config.network_key)),
             name=f"bot-{config.display_name()}",
             daemon=True,
         )
@@ -3493,8 +2922,21 @@ def main() -> None:
         run_bot_forever(configs[0])
         return
 
+    peer_nicks_by_config = _build_peer_nicks(configs)
     print(f"Starte {len(configs)} Netzwerke parallel.")
-    run_multiple_bots_forever(configs)
+    run_multiple_bots_forever(configs, peer_nicks_by_config)
+
+
+def _build_peer_nicks(configs: list[BotConfig]) -> dict[str, set[str]]:
+    by_network: dict[str, set[str]] = {}
+    for config in configs:
+        key = f"{config.server}:{config.port}"
+        by_network.setdefault(key, set()).add(config.nick)
+
+    return {
+        config.network_key: (by_network.get(f"{config.server}:{config.port}", set()) - {config.nick})
+        for config in configs
+    }
 
 
 if __name__ == "__main__":

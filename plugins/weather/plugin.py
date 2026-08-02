@@ -82,6 +82,11 @@ def handle_weather(bot, context, arg: str) -> None:
     bot.send_privmsg(context.reply_target, weather_text)
 
 
+def on_config_loaded(bot, raw_config: dict[str, object]) -> None:
+    bot._weather_appid = str(raw_config.get("weather_appid", "") or "").strip()
+    bot._weather_default_location = str(raw_config.get("weather_default_location", "") or "").strip()
+
+
 PLUGIN = PluginSpec(
     name="weather",
     translations=MESSAGES,
@@ -99,4 +104,5 @@ PLUGIN = PluginSpec(
             help_sort=100,
         ),
     ),
+    on_config_loaded=on_config_loaded,
 )

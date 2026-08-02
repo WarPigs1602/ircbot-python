@@ -1,4 +1,5 @@
 from plugin_system import CommandSpec, PluginSpec
+from plugins.dart.plugin import get_dart_top10_text
 
 
 MESSAGES = {
@@ -22,7 +23,7 @@ MESSAGES = {
 
 
 def handle_darttop10(bot, context, arg: str) -> None:
-    bot.send_privmsg(context.reply_target, bot.get_dart_top10_text())
+    bot.send_privmsg(context.reply_target, get_dart_top10_text(bot))
 
 
 PLUGIN = PluginSpec(

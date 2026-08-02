@@ -1,4 +1,5 @@
 from plugin_system import CommandSpec, PluginSpec
+from plugins.url_service import URLService
 
 
 MESSAGES = {
@@ -83,12 +84,20 @@ MESSAGES = {
 
 def handle_url(bot, context, arg: str) -> None:
     if not arg.strip():
-        bot.send_privmsg(context.reply_target, bot.build_url_usage_text(context.command_prefix))
+        max_id = URLService().get_max_url_id(bot)
+        if max_id is None:
+            bot.send_privmsg(context.reply_target, bot.tr("usage_url", prefix=context.command_prefix, command=bot.primary_command_name("url")))
+        else:
+            bot.send_privmsg(context.reply_target, bot.tr("usage_url_with_max", prefix=context.command_prefix, command=bot.primary_command_name("url"), max_id=max_id))
         return
 
     url_id = bot.parse_int(arg.strip())
     if url_id is None:
-        bot.send_privmsg(context.reply_target, bot.build_url_usage_text(context.command_prefix))
+        max_id = URLService().get_max_url_id(bot)
+        if max_id is None:
+            bot.send_privmsg(context.reply_target, bot.tr("usage_url", prefix=context.command_prefix, command=bot.primary_command_name("url")))
+        else:
+            bot.send_privmsg(context.reply_target, bot.tr("usage_url_with_max", prefix=context.command_prefix, command=bot.primary_command_name("url"), max_id=max_id))
         return
 
     result = bot.fetch_url_by_id(url_id)

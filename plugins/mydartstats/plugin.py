@@ -1,4 +1,5 @@
 from plugin_system import CommandSpec, PluginSpec
+from plugins.dart.plugin import get_my_dart_stats_text
 
 
 MESSAGES = {
@@ -18,7 +19,7 @@ MESSAGES = {
 
 
 def handle_mydartstats(bot, context, arg: str) -> None:
-    bot.send_notice(context.source_nick, bot.get_my_dart_stats_text(context.source_nick))
+    bot.send_notice(context.source_nick, get_my_dart_stats_text(bot, context.source_nick))
 
 
 PLUGIN = PluginSpec(

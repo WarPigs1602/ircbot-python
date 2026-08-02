@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bot import IRCBot
@@ -83,6 +83,8 @@ class PluginSpec:
     tick_handlers: tuple[TickHandlerSpec, ...] = ()
     translations: dict[str, dict[str, str]] = field(default_factory=dict)
     enabled_by_default: bool = True
+    hooks: dict[str, Callable[..., Any]] | None = None
+    on_config_loaded: Callable[..., Any] | None = None
 
 
 class PluginManager:
@@ -95,6 +97,7 @@ class PluginManager:
         self._tick_handlers: list[TickHandler] = []
         self._loaded_plugins: list[str] = []
         self._translations: dict[str, dict[str, str]] = {}
+        self._plugins_by_name: dict[str, PluginSpec] = {}
         self._state_lock = threading.RLock()
         self.load_plugins()
 
@@ -137,6 +140,50 @@ class PluginManager:
                 line = f"{line} - {help_text}"
             rendered.append(line)
         return tuple(rendered)
+
+    def get_hooks(self, name: str) -> tuple[Callable[..., Any], ...]:
+        with self._state_lock:
+            hooks = []
+            for plugin in self._plugins_by_name.values():
+                plugin_hooks = plugin.hooks
+                if plugin_hooks:
+                    hook = plugin_hooks.get(name)
+                    if hook is not None:
+                        hooks.append(hook)
+            return tuple(hooks)
+
+    def get_hook(self, name: str) -> Callable[..., Any] | None:
+        with self._state_lock:
+            for plugin in self._plugins_by_name.values():
+                plugin_hooks = plugin.hooks
+                if plugin_hooks:
+                    hook = plugin_hooks.get(name)
+                    if hook is not None:
+                        return hook
+        return None
+
+    def call_config_hooks(self, bot) -> None:
+        raw_config = getattr(bot, "raw_config", {})
+        with self._state_lock:
+            for plugin in self._plugins_by_name.values():
+                hook = plugin.on_config_loaded
+                if hook is not None:
+                    try:
+                        hook(bot, raw_config)
+                    except Exception:
+                        pass
+
+    def call_hooks(self, name: str, *args, **kwargs) -> None:
+        with self._state_lock:
+            for plugin in self._plugins_by_name.values():
+                plugin_hooks = plugin.hooks
+                if plugin_hooks:
+                    hook = plugin_hooks.get(name)
+                    if hook is not None:
+                        try:
+                            hook(*args, **kwargs)
+                        except Exception:
+                            pass
 
     def handle_privmsg(self, context: MessageContext) -> None:
         if not self.bot.public_triggers_enabled():
@@ -223,7 +270,10 @@ class PluginManager:
             sys.modules.pop(module_name, None)
 
     def _load_plugin_spec(self, plugin_path: Path) -> PluginSpec:
-        module_name = f"ircbot_plugin_{plugin_path.parent.name.lower()}"
+        if plugin_path.parent.name == "plugins":
+            module_name = f"ircbot_plugin_{plugin_path.stem.lower()}"
+        else:
+            module_name = f"ircbot_plugin_{plugin_path.parent.name.lower()}"
         spec = spec_from_file_location(module_name, plugin_path)
         if spec is None or spec.loader is None:
             raise RuntimeError(f"Plugin {plugin_path.parent.name} konnte nicht geladen werden.")
@@ -249,11 +299,14 @@ class PluginManager:
         disabled_plugins: set[str],
     ) -> bool:
         plugin_name = plugin.name.strip().lower()
-        plugin_aliases = {
-            alias.strip().lower()
-            for alias in (plugin_path.parent.name, *plugin.aliases)
-            if alias.strip()
-        }
+        if plugin_path.parent.name == "plugins":
+            plugin_aliases = {plugin_path.stem.lower()}
+        else:
+            plugin_aliases = {
+                alias.strip().lower()
+                for alias in (plugin_path.parent.name, *plugin.aliases)
+                if alias.strip()
+            }
         plugin_aliases.add(plugin_name)
         if enabled_plugins:
             return bool(plugin_aliases & enabled_plugins)
@@ -268,6 +321,7 @@ class PluginManager:
                 self._tick_handlers.clear()
                 self._loaded_plugins.clear()
                 self._translations.clear()
+                self._plugins_by_name.clear()
             return
 
         enabled_plugins = {name.strip().lower() for name in (self.bot.config.enabled_plugins or []) if name.strip()}
@@ -279,12 +333,9 @@ class PluginManager:
         next_tick_handlers: list[TickHandler] = []
         next_loaded_plugins: list[str] = []
         next_translations: dict[str, dict[str, str]] = {}
+        next_plugins_by_name: dict[str, PluginSpec] = {}
 
-        for plugin_path in sorted(self.plugins_dir.glob("*/plugin.py")):
-            plugin = self._load_plugin_spec(plugin_path)
-            if not self._plugin_is_enabled(plugin_path, plugin, enabled_plugins, disabled_plugins):
-                continue
-
+        def _register_loaded_plugin(plugin_path: Path, plugin: PluginSpec) -> None:
             plugin_name = plugin.name.strip().lower()
             self._register_plugin(
                 plugin,
@@ -295,6 +346,27 @@ class PluginManager:
                 translation_catalogs=next_translations,
             )
             next_loaded_plugins.append(plugin_name)
+            next_plugins_by_name[plugin_name] = plugin
+
+        for plugin_path in sorted(self.plugins_dir.glob("*/plugin.py")):
+            try:
+                plugin = self._load_plugin_spec(plugin_path)
+            except Exception:
+                continue
+            if not self._plugin_is_enabled(plugin_path, plugin, enabled_plugins, disabled_plugins):
+                continue
+            _register_loaded_plugin(plugin_path, plugin)
+
+        for plugin_path in sorted(self.plugins_dir.glob("*.py")):
+            if plugin_path.name.startswith("_"):
+                continue
+            try:
+                plugin = self._load_plugin_spec(plugin_path)
+            except Exception:
+                continue
+            if not self._plugin_is_enabled(plugin_path, plugin, enabled_plugins, disabled_plugins):
+                continue
+            _register_loaded_plugin(plugin_path, plugin)
 
         with self._state_lock:
             self._commands_by_canonical = next_commands_by_canonical
@@ -303,6 +375,7 @@ class PluginManager:
             self._tick_handlers = next_tick_handlers
             self._loaded_plugins = next_loaded_plugins
             self._translations = next_translations
+            self._plugins_by_name = next_plugins_by_name
 
     def _register_plugin(
         self,

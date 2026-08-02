@@ -11,6 +11,123 @@ from urllib.request import Request, urlopen
 
 from plugin_system import CommandSpec, PluginSpec, TickHandlerSpec
 
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
+
+RSS_ANNOUNCE_CHANNELS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS bot_rss_announce_channels (
+    network VARCHAR(255) NOT NULL,
+    channel VARCHAR(128) NOT NULL,
+    updated_at VARCHAR(32) NOT NULL,
+    PRIMARY KEY (network, channel),
+    KEY idx_bot_rss_announce_channels_lookup (network, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
+class RSSRepository:
+    def __init__(self, db_conn, network_key):
+        self.db_conn = db_conn
+        self.network_key = network_key
+
+    def get_announce_channels(self, current_time, fallback_channels):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(RSS_ANNOUNCE_CHANNELS_TABLE_SQL)
+                cur.execute(
+                    "SELECT channel FROM bot_rss_announce_channels WHERE network = %s ORDER BY channel ASC",
+                    (self.network_key,),
+                )
+                rows = cur.fetchall() or []
+                db_channels = []
+                for row in rows:
+                    channel = _normalize_channel(row.get("channel", ""))
+                    if channel.startswith("#"):
+                        db_channels.append(channel)
+                if db_channels:
+                    return tuple(db_channels)
+                for channel in fallback_channels:
+                    cur.execute(
+                        "INSERT IGNORE INTO bot_rss_announce_channels (network, channel, updated_at) VALUES (%s, %s, %s)",
+                        (self.network_key, channel, current_time),
+                    )
+                return tuple(fallback_channels)
+        except Exception:
+            return tuple(fallback_channels)
+
+    def set_announce_channels(self, channels, current_time):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(RSS_ANNOUNCE_CHANNELS_TABLE_SQL)
+                cur.execute("DELETE FROM bot_rss_announce_channels WHERE network = %s", (self.network_key,))
+                for channel in channels:
+                    cur.execute(
+                        "INSERT INTO bot_rss_announce_channels (network, channel, updated_at) VALUES (%s, %s, %s)",
+                        (self.network_key, channel, current_time),
+                    )
+            return True
+        except Exception:
+            return False
+
+    def ensure_seen_table(self):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_rss_seen (
+                        network VARCHAR(255) NOT NULL,
+                        feed_alias VARCHAR(128) NOT NULL,
+                        entry_hash CHAR(64) NOT NULL,
+                        entry_id VARCHAR(512) NOT NULL DEFAULT '',
+                        entry_link VARCHAR(2048) NOT NULL DEFAULT '',
+                        entry_title VARCHAR(512) NOT NULL DEFAULT '',
+                        seen_at VARCHAR(32) NOT NULL,
+                        PRIMARY KEY (network, feed_alias, entry_hash),
+                        KEY idx_bot_rss_seen_lookup (network, feed_alias, seen_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+            return True
+        except Exception:
+            return False
+
+    def register_seen_entry(self, feed_alias, entry_hash, entry_id, entry_link, entry_title, seen_at):
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS total_entries FROM bot_rss_seen WHERE network = %s AND feed_alias = %s",
+                    (self.network_key, feed_alias),
+                )
+                row = cur.fetchone() or {}
+                known_entries = int(row.get("total_entries", 0) or 0)
+
+                cur.execute(
+                    """
+                    INSERT IGNORE INTO bot_rss_seen
+                        (network, feed_alias, entry_hash, entry_id, entry_link, entry_title, seen_at)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        self.network_key,
+                        feed_alias,
+                        entry_hash,
+                        entry_id,
+                        entry_link,
+                        entry_title,
+                        seen_at,
+                    ),
+                )
+                return cur.rowcount > 0, known_entries > 0
+        except Exception:
+            return False, False
+
+
+def _normalize_channel(value: str) -> str:
+    return str(value).strip().lower()
+
 
 USER_AGENT = "Mozilla/5.0 IRCBot RSS"
 MAX_FEED_BYTES = 1024 * 1024
@@ -56,9 +173,17 @@ class FeedEntry:
     entry_id: str
 
 
+def _get_rss_feeds(bot) -> dict[str, str]:
+    return dict(getattr(bot, "_rss_feeds", {}) or {})
+
+
+def _get_rss_announce_channel(bot) -> str:
+    return str(getattr(bot, "_rss_announce_channel", "") or "").strip()
+
+
 def handle_rss(bot, context, arg: str) -> None:
     raw_target = arg.strip()
-    configured_feeds = dict(getattr(bot.config, "rss_feeds", {}) or {})
+    configured_feeds = _get_rss_feeds(bot)
     if not raw_target:
         bot.send_privmsg(context.reply_target, bot.tr("usage_rss", prefix=context.command_prefix, command=bot.primary_command_name("rss")))
         if configured_feeds:
@@ -100,7 +225,7 @@ def handle_rss(bot, context, arg: str) -> None:
 
 
 def handle_tick(bot) -> None:
-    configured_feeds = dict(getattr(bot.config, "rss_feeds", {}) or {})
+    configured_feeds = _get_rss_feeds(bot)
     if not configured_feeds:
         return
 
@@ -122,19 +247,60 @@ def handle_tick(bot) -> None:
             bot.send_privmsg(channel, message)
 
 
+def get_rss_announce_channels(bot) -> tuple[str, ...]:
+    if pymysql is None:
+        return ()
+
+    fallback_channels = [
+        channel.strip()
+        for channel in _get_rss_announce_channel(bot).replace(";", ",").split(",")
+        if channel.strip().startswith("#")
+    ]
+
+    conn = bot.open_db_connection()
+    if conn is None:
+        return tuple(fallback_channels)
+
+    try:
+        return RSSRepository(conn, bot.config.network_key).get_announce_channels(
+            bot.current_time_string(), fallback_channels
+        )
+    finally:
+        conn.close()
+
+
+def set_rss_announce_channels(bot, channels: list[str]) -> tuple[bool, str]:
+    if pymysql is None:
+        return False, "pymysql missing"
+
+    normalized_channels: list[str] = []
+    for channel in channels:
+        normalized = bot.normalize_channel_name(channel)
+        if not normalized or not normalized.startswith("#"):
+            return False, "Ungueltiger Channel."
+        if normalized not in normalized_channels:
+            normalized_channels.append(normalized)
+
+    conn = bot.open_db_connection()
+    if conn is None:
+        return False, "DB connection failed"
+
+    try:
+        return RSSRepository(conn, bot.config.network_key).set_announce_channels(
+            normalized_channels, bot.current_time_string()
+        ), ""
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        conn.close()
+
+
 def resolve_announce_channels(bot) -> tuple[str, ...]:
-    get_channels = getattr(bot, "get_rss_announce_channels", None)
-    if callable(get_channels):
-        channels = tuple(str(channel).strip() for channel in (get_channels() or ()) if str(channel).strip())
-        if channels:
-            return channels
+    channels = get_rss_announce_channels(bot)
+    if channels:
+        return channels
 
-    get_channel = getattr(bot, "get_rss_announce_channel", None)
-    if callable(get_channel):
-        channel = str(get_channel() or "").strip()
-        return (channel,) if channel else ()
-
-    fallback = str(getattr(bot.config, "rss_announce_channel", "") or "").strip()
+    fallback = _get_rss_announce_channel(bot)
     return (fallback,) if fallback else ()
 
 
@@ -171,29 +337,11 @@ def ensure_seen_entries_table(bot) -> bool:
         return False
 
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS bot_rss_seen (
-                    network VARCHAR(255) NOT NULL,
-                    feed_alias VARCHAR(128) NOT NULL,
-                    entry_hash CHAR(64) NOT NULL,
-                    entry_id VARCHAR(512) NOT NULL DEFAULT '',
-                    entry_link VARCHAR(2048) NOT NULL DEFAULT '',
-                    entry_title VARCHAR(512) NOT NULL DEFAULT '',
-                    seen_at VARCHAR(32) NOT NULL,
-                    PRIMARY KEY (network, feed_alias, entry_hash),
-                    KEY idx_bot_rss_seen_lookup (network, feed_alias, seen_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                """
-            )
-    except Exception:
-        return False
+        result = RSSRepository(conn, bot.config.network_key).ensure_seen_table()
+        setattr(bot, "_rss_seen_table_ready", result)
+        return result
     finally:
         conn.close()
-
-    setattr(bot, "_rss_seen_table_ready", True)
-    return True
 
 
 def register_seen_entry(bot, feed_alias: str, entry: FeedEntry) -> bool:
@@ -205,41 +353,20 @@ def register_seen_entry(bot, feed_alias: str, entry: FeedEntry) -> bool:
     seen_at = str(int(time.time()))
 
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) AS total_entries FROM bot_rss_seen WHERE network = %s AND feed_alias = %s",
-                (bot.config.network_key, feed_alias),
-            )
-            row = cur.fetchone() or {}
-            known_entries = int(row.get("total_entries", 0) or 0)
-
-            cur.execute(
-                """
-                INSERT IGNORE INTO bot_rss_seen
-                    (network, feed_alias, entry_hash, entry_id, entry_link, entry_title, seen_at)
-                VALUES
-                    (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    bot.config.network_key,
-                    feed_alias,
-                    entry_hash,
-                    normalize_text(entry.entry_id),
-                    normalize_text(entry.entry_link),
-                    normalize_text(entry.entry_title),
-                    seen_at,
-                ),
-            )
-            inserted = cur.rowcount > 0
-    except Exception:
-        return False
+        inserted, known = RSSRepository(conn, bot.config.network_key).register_seen_entry(
+            feed_alias, entry_hash,
+            normalize_text(entry.entry_id),
+            normalize_text(entry.entry_link),
+            normalize_text(entry.entry_title),
+            seen_at,
+        )
     finally:
         conn.close()
 
     if not inserted:
         return False
 
-    return known_entries > 0
+    return known
 
 
 def build_entry_hash(entry: FeedEntry) -> str:
@@ -419,6 +546,31 @@ def render_feed_reply(bot, feed_title: str, entry_title: str, entry_link: str) -
     return bot.tr("rss_latest_link_only", feed=normalized_feed, link=shorten_text(normalized_link, MAX_REPLY_LENGTH))
 
 
+def ensure_rss_tables(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute(RSS_ANNOUNCE_CHANNELS_TABLE_SQL)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_rss_seen (
+                network VARCHAR(255) NOT NULL,
+                feed_alias VARCHAR(128) NOT NULL,
+                entry_hash CHAR(64) NOT NULL,
+                entry_id VARCHAR(512) NOT NULL DEFAULT '',
+                entry_link VARCHAR(2048) NOT NULL DEFAULT '',
+                entry_title VARCHAR(512) NOT NULL DEFAULT '',
+                seen_at VARCHAR(32) NOT NULL,
+                PRIMARY KEY (network, feed_alias, entry_hash),
+                KEY idx_bot_rss_seen_lookup (network, feed_alias, seen_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+
+def on_config_loaded(bot, raw_config: dict[str, object]) -> None:
+    bot._rss_feeds = dict(raw_config.get("rss_feeds", {}) or {})
+    bot._rss_announce_channel = str(raw_config.get("rss_announce_channel", "") or "").strip()
+
+
 PLUGIN = PluginSpec(
     name="rss",
     translations=MESSAGES,
@@ -438,4 +590,9 @@ PLUGIN = PluginSpec(
     tick_handlers=(
         TickHandlerSpec(handler=handle_tick),
     ),
+    hooks={
+        "ensure_tables": ensure_rss_tables,
+        "set_rss_announce_channels": set_rss_announce_channels,
+    },
+    on_config_loaded=on_config_loaded,
 )
