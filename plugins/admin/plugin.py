@@ -13,6 +13,12 @@ try:
 except ImportError:
     pymysql = None
 
+try:
+    from plugins.rss.plugin import get_rss_announce_channels, set_rss_announce_channels
+except Exception:
+    get_rss_announce_channels = None
+    set_rss_announce_channels = None
+
 
 class AdminRepository:
     def __init__(self, db_conn, network_key):
@@ -1002,6 +1008,8 @@ def parse_rssannounce_channels_arg(requested: str) -> tuple[str, list[str] | Non
 
 
 def current_rssannounce_channels(bot) -> list[str]:
+    if get_rss_announce_channels is None:
+        return []
     return [str(channel).strip().lower() for channel in (get_rss_announce_channels(bot) or ()) if str(channel).strip()]
 
 
@@ -1110,6 +1118,10 @@ def handle_admin_rss_command(bot, context, parts: list[str]) -> bool:
         return True
 
     target_channels = target_rssannounce_channels(bot, mode, parsed_channels)
+
+    if set_rss_announce_channels is None:
+        reply(bot, context, bot.tr("admin_rssannounce_save_failed", error="RSS plugin not available"))
+        return True
 
     ok, error = set_rss_announce_channels(bot, target_channels)
     if not ok:
